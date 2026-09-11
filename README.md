@@ -37,6 +37,17 @@ The noise floor from three A/A runs of the reference is 5.8%, so every row count
 
 Reproduce with `experiments/hopper_gemm/{gen_inputs,ref_cutedsl,cand_pallas}.py`. Each script's docstring has its invocation. Use one pinned `ptxas` (≥ 12.9, for PTX ISA 8.8) for both kernels.
 
+## Ports
+
+| port | status |
+|---|---|
+| [`ports/hopper_mixed_dtype_grouped_gemm`](ports/hopper_mixed_dtype_grouped_gemm/README.md) | CUTLASS C++ example 69 (fp8 x bf16 mixed-input grouped GEMM) ported to CuTeDSL: bit-exact, at parity with C++ on the example's benchmark configurations; int4 variants not yet ported |
+
+## Known limitations
+
+- Diagnose's discrepancy rows are compiler-agnostic, but its suggested fixes name Pallas Mosaic GPU levers. Diffing two non-Pallas kernels (as the port below does) gives correct rows with inapplicable advice.
+- `L1.ldmatrix` and similar inventory rows are kernel-wide, so they do not say which loop (mainloop vs epilogue) the difference is in.
+
 ## Usage
 
 ```bash

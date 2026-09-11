@@ -12,6 +12,11 @@ by how it gets applied:
 Fixes are ordered by convergence phase (P1 skeleton -> P5 micro), then by the
 weight of the rows they close, because fine-level rows are noise until the
 coarse ones match.
+
+The discrepancy rows are compiler-agnostic, but the *fix text* names Pallas
+Mosaic GPU levers, since that is the intended candidate. `mosaicist diff` is
+useful with any candidate (a CuTeDSL port, a C++ kernel), and then the rows
+still apply while the suggested levers do not.
 """
 
 from __future__ import annotations

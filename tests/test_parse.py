@@ -126,3 +126,50 @@ def test_fixtures_parse(ref_ptx, cand_ptx):
         fn = parse(text).entry()
         assert len(fn.instrs) > 30
         build_cfg(fn)
+
+
+CUOBJDUMP = """
+Fatbin ptx code:
+================
+arch = sm_90a
+code version = [8,7]
+host = linux
+compile_size = 64bit
+
+.version 8.7
+.target sm_90a
+.address_size 64
+.visible .entry _ZN7cutlass13device_kernelINS_4gemm6kernel13GemmUniversalIMixedInputILi19EEE()
+{
+	ret;
+}
+
+Fatbin ptx code:
+================
+arch = sm_90a
+.version 8.7
+.target sm_90a
+.address_size 64
+.visible .entry _ZN7cutlass13device_kernelINS_4gemm6kernel13GemmUniversalIMixedInputILi19EEE()
+{
+	mov.u32 %r1, 1;
+	mov.u32 %r2, 2;
+	ret;
+}
+.visible .entry _ZN7cutlass9reference6device6kernel12BlockForEachE()
+{
+	ret;
+}
+"""
+
+
+def test_cuobjdump_output_and_substring_entries():
+    from mosaicist.ptx.parse import split_modules
+
+    assert len(split_modules(CUOBJDUMP)) == 2
+    mod = parse(CUOBJDUMP)  # banners are ignored; entries are the union
+    # a unique substring selects an entry; a name repeated across modules resolves to the largest copy
+    e = mod.entry("MixedInputILi19")
+    assert len(e.instrs) == 3
+    with pytest.raises(KeyError):
+        mod.entry("device")  # matches two different kernels
