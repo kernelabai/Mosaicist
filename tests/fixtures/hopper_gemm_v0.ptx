@@ -1,0 +1,70 @@
+//
+// Test fixture modeled on Mosaic GPU output for a naive Pallas translation of
+// the same GEMM: same 128x256 tile, but one warpgroup issues both TMA and MMA,
+// no cluster, and every step fully drains the tensor core.
+// Abbreviated: accumulator vectors and address arithmetic are trimmed.
+//
+.version 8.4
+.target sm_90a
+.address_size 64
+
+.extern .shared .align 1024 .b8 global_smem[];
+
+.visible .entry mosaic_gpu_body(
+	.param .u64 mosaic_gpu_body_param_0,
+	.param .u64 mosaic_gpu_body_param_1
+)
+.maxntid 128, 1, 1
+{
+	.reg .pred 	%p<16>;
+	.reg .b32 	%r<96>;
+	.reg .b64 	%rd<32>;
+	.reg .f32 	%f<260>;
+
+	mov.u32 	%r1, %tid.x;
+	ld.param.u64 	%rd5, [mosaic_gpu_body_param_1];
+	mov.u32 	%r3, 128;
+	elect.sync 	%r2|%p1, -1;
+	@!%p1 bra 	$L__BB0_2;
+	mbarrier.init.shared::cta.b64 	[global_smem], 1;
+	mbarrier.init.shared::cta.b64 	[global_smem+8], 1;
+$L__BB0_2:
+	bar.sync 	0;
+	mov.u32 	%r10, 0;
+$L__BB0_3:
+	and.b32 	%r20, %r10, 1;
+	@!%p1 bra 	$L__BB0_5;
+	mbarrier.arrive.expect_tx.shared::cta.b64 	_, [%r21], 49152;
+	cp.async.bulk.tensor.2d.shared::cluster.global.mbarrier::complete_tx::bytes [%r22], [%rd1, {%r23, %r24}], [%r21];
+	cp.async.bulk.tensor.2d.shared::cluster.global.mbarrier::complete_tx::bytes [%r25], [%rd2, {%r26, %r24}], [%r21];
+$L__BB0_5:
+	add.s32 	%r27, %r20, 1;
+$L__BB0_6:
+	mbarrier.try_wait.parity.shared::cta.b64 	%p3, [%r21], %r28;
+	@!%p3 bra 	$L__BB0_6;
+	wgmma.fence.sync.aligned;
+	wgmma.mma_async.sync.aligned.m64n256k16.f32.bf16.bf16 {%f1, %f2, %f3, %f4}, %rd10, %rd11, %p6, 1, 1, 0, 1;
+	wgmma.mma_async.sync.aligned.m64n256k16.f32.bf16.bf16 {%f5, %f6, %f7, %f8}, %rd12, %rd11, %p6, 1, 1, 0, 1;
+	wgmma.mma_async.sync.aligned.m64n256k16.f32.bf16.bf16 {%f1, %f2, %f3, %f4}, %rd13, %rd14, %p6, 1, 1, 0, 1;
+	wgmma.mma_async.sync.aligned.m64n256k16.f32.bf16.bf16 {%f5, %f6, %f7, %f8}, %rd15, %rd14, %p6, 1, 1, 0, 1;
+	wgmma.mma_async.sync.aligned.m64n256k16.f32.bf16.bf16 {%f1, %f2, %f3, %f4}, %rd16, %rd17, %p6, 1, 1, 0, 1;
+	wgmma.mma_async.sync.aligned.m64n256k16.f32.bf16.bf16 {%f5, %f6, %f7, %f8}, %rd18, %rd17, %p6, 1, 1, 0, 1;
+	wgmma.mma_async.sync.aligned.m64n256k16.f32.bf16.bf16 {%f1, %f2, %f3, %f4}, %rd19, %rd20, %p6, 1, 1, 0, 1;
+	wgmma.mma_async.sync.aligned.m64n256k16.f32.bf16.bf16 {%f5, %f6, %f7, %f8}, %rd21, %rd20, %p6, 1, 1, 0, 1;
+	wgmma.commit_group.sync.aligned;
+	wgmma.wait_group.sync.aligned 0;
+	mbarrier.arrive.shared::cta.b64 	_, [%r29];
+	add.s32 	%r10, %r10, 1;
+	setp.lt.s32 	%p4, %r10, %r3;
+	@%p4 bra 	$L__BB0_3;
+	cvt.rn.bf16x2.f32 	%r40, %f2, %f1;
+	st.shared.v4.b32 	[%r41], {%r40, %r42, %r43, %r44};
+	fence.proxy.async.shared::cta;
+	bar.sync 	0;
+	@!%p1 bra 	$L__BB0_9;
+	cp.async.bulk.tensor.2d.global.shared::cta.bulk_group [%rd3, {%r45, %r46}], [%r41];
+	cp.async.bulk.commit_group;
+	cp.async.bulk.wait_group.read 0;
+$L__BB0_9:
+	ret;
+}

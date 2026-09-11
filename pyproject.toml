@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mosaicist"
+version = "0.0.1"
+description = "Lower CuTeDSL kernels to PTX, translate them to Pallas Mosaic GPU, and converge the Pallas kernel on the original's runtime and numerics."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.24"]
+
+[project.optional-dependencies]
+# GPU-side extras: only installable/usable on a Linux host with an sm_90a/sm_100a GPU.
+cutedsl = ["nvidia-cutlass-dsl"]
+pallas = ["jax[cuda12]"]
+dev = ["pytest>=7"]
+
+[project.scripts]
+mosaicist = "mosaicist.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

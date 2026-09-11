@@ -1,0 +1,5 @@
+ptxas info    : 0 bytes gmem
+ptxas info    : Compiling entry function 'kernel_gemm_ws' for 'sm_90a'
+ptxas info    : Function properties for kernel_gemm_ws
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 168 registers, 0 bytes smem, 560 bytes cmem[0]

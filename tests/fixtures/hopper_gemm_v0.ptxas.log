@@ -1,0 +1,5 @@
+ptxas info    : 0 bytes gmem
+ptxas info    : Compiling entry function 'mosaic_gpu_body' for 'sm_90a'
+ptxas info    : Function properties for mosaic_gpu_body
+    1024 bytes stack frame, 1024 bytes spill stores, 1152 bytes spill loads
+ptxas info    : Used 255 registers, 0 bytes smem, 400 bytes cmem[0]

@@ -1,0 +1,104 @@
+//
+// Test fixture modeled on CuTeDSL output for a warp-specialized Hopper BF16 GEMM
+// (128x256 tile, 1 producer + 2 consumer warpgroups, 2x1 cluster).
+// Abbreviated: accumulator vectors and address arithmetic are trimmed.
+//
+.version 8.5
+.target sm_90a
+.address_size 64
+
+.file 1 "examples/python/CuTeDSL/hopper/dense_gemm.py"
+
+.extern .shared .align 1024 .b8 smem[];
+
+.visible .entry kernel_gemm_ws(
+	.param .align 64 .b8 kernel_gemm_ws_param_0[128],
+	.param .align 64 .b8 kernel_gemm_ws_param_1[128],
+	.param .align 64 .b8 kernel_gemm_ws_param_2[128],
+	.param .u32 kernel_gemm_ws_param_3
+)
+.reqntid 384, 1, 1
+.reqnctapercluster 2, 1, 1
+{
+	.reg .pred 	%p<32>;
+	.reg .b16 	%rs<4>;
+	.reg .b32 	%r<128>;
+	.reg .b64 	%rd<64>;
+	.reg .f32 	%f<260>;
+
+	.loc 1 212 0
+	mov.u32 	%r1, %tid.x;
+	shr.u32 	%r2, %r1, 7;
+	ld.param.u32 	%r3, [kernel_gemm_ws_param_3];
+	setp.ne.s32 	%p1, %r1, 0;
+	@%p1 bra 	$L__BB0_2;
+	mbarrier.init.shared::cta.b64 	[smem], 1;
+	mbarrier.init.shared::cta.b64 	[smem+8], 1;
+	mbarrier.init.shared::cta.b64 	[smem+16], 1;
+	mbarrier.init.shared::cta.b64 	[smem+24], 1;
+	mbarrier.init.shared::cta.b64 	[smem+32], 4;
+	mbarrier.init.shared::cta.b64 	[smem+40], 4;
+	mbarrier.init.shared::cta.b64 	[smem+48], 4;
+	mbarrier.init.shared::cta.b64 	[smem+56], 4;
+	fence.mbarrier_init.release.cluster;
+$L__BB0_2:
+	barrier.cluster.arrive.aligned;
+	barrier.cluster.wait.aligned;
+	setp.ne.s32 	%p2, %r2, 0;
+	@%p2 bra 	$L__BB0_8;
+	// ---- producer warpgroup ----
+	.loc 1 240 0
+	setmaxnreg.dec.sync.aligned.u32 40;
+	mov.u32 	%r10, 0;
+$L__BB0_4:
+	.loc 1 251 0
+	and.b32 	%r20, %r10, 3;
+$L__BB0_5:
+	mbarrier.try_wait.parity.shared::cta.b64 	%p3, [%r21], %r22;
+	@!%p3 bra 	$L__BB0_5;
+	mbarrier.arrive.expect_tx.shared::cta.b64 	_, [%r23], 49152;
+	.loc 1 255 0
+	cp.async.bulk.tensor.2d.shared::cluster.global.mbarrier::complete_tx::bytes [%r24], [%rd1, {%r25, %r26}], [%r23];
+	cp.async.bulk.tensor.2d.shared::cluster.global.mbarrier::complete_tx::bytes.multicast::cluster [%r27], [%rd2, {%r28, %r26}], [%r23], %rs1;
+	add.s32 	%r10, %r10, 1;
+	setp.lt.s32 	%p4, %r10, %r3;
+	@%p4 bra 	$L__BB0_4;
+	bra.uni 	$L__BB0_16;
+$L__BB0_8:
+	// ---- consumer warpgroups ----
+	.loc 1 280 0
+	setmaxnreg.inc.sync.aligned.u32 240;
+	mov.u32 	%r11, 0;
+$L__BB0_9:
+	.loc 1 290 0
+	and.b32 	%r30, %r11, 3;
+$L__BB0_10:
+	mbarrier.try_wait.parity.shared::cta.b64 	%p5, [%r31], %r32;
+	@!%p5 bra 	$L__BB0_10;
+	.loc 1 292 0
+	wgmma.fence.sync.aligned;
+	wgmma.mma_async.sync.aligned.m64n256k16.f32.bf16.bf16 {%f1, %f2, %f3, %f4}, %rd10, %rd11, %p6, 1, 1, 0, 1;
+	wgmma.mma_async.sync.aligned.m64n256k16.f32.bf16.bf16 {%f1, %f2, %f3, %f4}, %rd12, %rd13, %p6, 1, 1, 0, 1;
+	wgmma.mma_async.sync.aligned.m64n256k16.f32.bf16.bf16 {%f1, %f2, %f3, %f4}, %rd14, %rd15, %p6, 1, 1, 0, 1;
+	wgmma.mma_async.sync.aligned.m64n256k16.f32.bf16.bf16 {%f1, %f2, %f3, %f4}, %rd16, %rd17, %p6, 1, 1, 0, 1;
+	wgmma.commit_group.sync.aligned;
+	.loc 1 297 0
+	wgmma.wait_group.sync.aligned 1;
+	.loc 1 299 0
+	mbarrier.arrive.release.cluster.shared::cluster.b64 	_, [%r33];
+	add.s32 	%r11, %r11, 1;
+	setp.lt.s32 	%p7, %r11, %r3;
+	@%p7 bra 	$L__BB0_9;
+	wgmma.wait_group.sync.aligned 0;
+	// ---- epilogue: registers -> smem -> TMA store ----
+	.loc 1 320 0
+	cvt.rn.bf16x2.f32 	%r40, %f2, %f1;
+	stmatrix.sync.aligned.m8n8.x4.shared.b16 	[%r41], {%r40, %r42, %r43, %r44};
+	fence.proxy.async.shared::cta;
+	bar.sync 	1, 256;
+	cp.async.bulk.tensor.2d.global.shared::cta.bulk_group [%rd3, {%r45, %r46}], [%r41];
+	cp.async.bulk.commit_group;
+	cp.async.bulk.wait_group.read 0;
+$L__BB0_16:
+	ret;
+}
