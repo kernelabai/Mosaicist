@@ -18,7 +18,7 @@ import re
 from collections import Counter
 from dataclasses import asdict, dataclass, field
 
-from .cfg import CFG, Loop, build_cfg
+from .cfg import CFG, Loop, build_cfg, dominates
 from .ops import LOAD_FAMILIES, classify, fp_flavor_key
 from .parse import Instr, Module, parse
 
@@ -77,12 +77,13 @@ def _role(counts: Counter, has_structural_children: bool) -> str:
         return "mma+load"
     if has_mma:
         return "mma"
+    if has_structural_children:
+        # a tile loop: its own body holds prologue loads / epilogue stores around inner loops
+        return "outer"
     if has_load:
         return "load"
     if has_store:
         return "store"
-    if has_structural_children:
-        return "outer"
     return "other"
 
 
@@ -127,6 +128,13 @@ def parse_ptxas_log(text: str, entry: str | None = None) -> dict:
         out["stack_frame"], out["spill_stores"], out["spill_loads"] = map(int, m.groups())
     if m := re.search(r"(\d+) bytes smem", section):
         out["static_smem"] = int(m.group(1))
+    # Performance advisories, e.g. "(C7519) warpgroup.arrive is injected ..." or
+    # "(C7510) Potential Performance Loss: wgmma.mma_async instructions are serialized ...".
+    # They can precede the "Compiling entry function" line, so scan the whole log.
+    advisories = sorted({f"{m.group(1)}: {m.group(2).strip()}"
+                         for m in re.finditer(r"\((C\d{4})\)\s*([^\n]*)", text)})
+    if advisories:
+        out["ptxas_advisories"] = advisories
     return out
 
 
@@ -204,10 +212,23 @@ def fingerprint(
 
     mma_loops = [lp for lp in loops if lp.role in ("mma", "mma+load")]
     load_loops = [lp for lp in loops if lp.role == "load"]
-    warp_specialized = any(
-        ld.id != mm.id and mm not in ancestors(ld) and ld not in ancestors(mm)
+    # Warp-specialized producer/consumer loops sit on mutually exclusive branches:
+    # neither reaches the other without going around an enclosing loop (e.g. the
+    # persistent tile loop), so reachability ignores back edges. A load loop that
+    # flows forward into the MMA loop is a prefetch prologue run by the same warps.
+    headers = {lp.id: cfg.loops[lp.id].header for lp in structural}
+    reach = {lid: _forward_reachable(cfg, h) for lid, h in headers.items()}
+    specialized_pairs = [
+        (ld, mm) for ld in load_loops for mm in mma_loops
+        if headers[mm.id] not in reach[ld.id] and headers[ld.id] not in reach[mm.id]
+    ]
+    prefetch_prologue = any(
+        headers[mm.id] in reach[ld.id] and headers[ld.id] not in reach[mm.id]
         for ld in load_loops for mm in mma_loops
     )
+    # Register reallocation in both directions only happens between warp roles.
+    dirs = {d for d, _ in setmaxnreg}
+    warp_specialized = bool(specialized_pairs) or {"inc", "dec"} <= dirs
     persistent = any(any(True for _ in ancestors(lp)) for lp in mma_loops)
     wait_depths = sorted({
         int(t.split(":")[1]) for lp in mma_loops for t in lp.tokens
@@ -224,6 +245,7 @@ def fingerprint(
         "max_depth": max((lp.depth for lp in structural), default=0),
         "roles": sorted(lp.role for lp in loops if lp.role != "kernel"),
         "warp_specialized": warp_specialized,
+        "prefetch_prologue": prefetch_prologue,
         "persistent": persistent,
         "mma_loop_depth": max((lp.depth for lp in mma_loops), default=0),
         "mbarrier_inits": inventory.get("mbarrier.init", 0),
@@ -271,6 +293,20 @@ def _kernel_tokens(instrs: list[Instr]):
         op = classify(ins)
         if op is not None and op.token is not None:
             yield op.token
+
+
+def _forward_reachable(cfg: CFG, start: int) -> set[int]:
+    """Blocks reachable from `start` without taking a back edge (u -> v where v dominates u)."""
+    seen: set[int] = set()
+    stack = [start]
+    while stack:
+        u = stack.pop()
+        for v in cfg.blocks[u].succs:
+            if v in seen or dominates(cfg.idom, v, u):
+                continue
+            seen.add(v)
+            stack.append(v)
+    return seen
 
 
 def _structural_parent(cfg: CFG, lp: Loop) -> int | None:

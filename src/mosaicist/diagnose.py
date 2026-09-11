@@ -67,13 +67,32 @@ def _warp_structure(rows: _Rows) -> Fix | None:
     ws = rows.get("L2.warp_specialized")
     if wg is None and ws is None:
         return None
-    ref_ws = bool(ws.ref) if ws else None
+    ctx = wg.context if wg is not None else {}
+    ref_ws = bool(ws.ref) if ws is not None else ctx.get("ref_ws")
+    cand_ws = bool(ws.cand) if ws is not None else ctx.get("cand_ws")
+    rc, cc = ctx.get("ref_compute"), ctx.get("cand_compute")
     spills = rows.get("L5.spills")
     per_stage = rows.prefixed("L1.mma_per_stage")
-    if wg is not None and wg.ref < wg.cand:
+
+    if cand_ws and not ref_ws and (rc is None or rc == cc):
+        # Same compute warpgroups; the candidate adds a producer. Not obviously a regression.
+        regs = rows.get("L0.setmaxnreg")
+        keys, w, layers = rows.take([wg, ws, regs])
+        n = f"{cc} " if cc else ""
+        return Fix(
+            "P1", "investigate",
+            "Candidate adds a producer warpgroup; reference issues TMA from its compute warps",
+            f"Both run {n}compute warpgroup(s). The candidate is warp-specialized (a memory warpgroup, "
+            "with register reallocation) while the reference prefetches stages and issues the next TMA "
+            "from inside its MMA loop. To mirror the reference, drop the memory warpgroup: use "
+            f"plgpu.emit_pipeline with num_threads={rc or cc} instead of emit_pipeline_warp_specialized. "
+            "Keep the warp-specialized structure if it measures faster; runtime decides.",
+            keys, w, layers)
+    if rc is not None and cc is not None and cc > rc:
         keys, w, layers = rows.take([wg])
-        return Fix("P1", "knob", f"Candidate uses {wg.cand} warpgroups per CTA; reference uses {wg.ref}",
-                   "Reduce num_threads / num_compute_wgs to the reference's warpgroup count.", keys, w, layers)
+        return Fix("P1", "knob", f"Candidate runs {cc} compute warpgroups per CTA; reference runs {rc}",
+                   "Reduce num_compute_wgs (or num_threads) to the reference's compute warpgroup count.",
+                   keys, w, layers)
     total = wg.ref if wg is not None else None
     producer = 1 if ref_ws else 0
     compute = (total - producer) if total else None
@@ -134,6 +153,45 @@ def _cluster_multicast(rows: _Rows) -> Fix | None:
     return Fix("P2", tag, title, " ".join(parts) or "Match the reference cluster shape.", keys, w, layers)
 
 
+def _persistence(rows: _Rows) -> Fix | None:
+    p = rows.get("L2.persistent")
+    if p is None:
+        return None
+    g = rows.get("L0.grid")
+    grid = f" (grid: reference {g.ref}, candidate {g.cand})" if g is not None else ""
+    keys, w, layers = rows.take([p, g])
+    if p.ref:
+        return Fix("P4", "rewrite", "Reference is persistent; candidate is not" + grid,
+                   "Launch one CTA (or cluster) per SM and loop over output tiles with plgpu.nd_loop "
+                   "(or plgpu.dynamic_scheduling_loop on sm_100a), overlapping each tile's epilogue "
+                   "with the next tile's mainloop.", keys, w, layers)
+    return Fix("P4", "investigate", "Candidate is persistent; reference is not" + grid,
+               "To mirror the reference, launch one CTA per output tile (a grid over tiles, no nd_loop). "
+               "A persistent loop mainly pays off when it hides the epilogue or the tail wave; keep it "
+               "if it measures faster.", keys, w, layers)
+
+
+_ADVISORY_HINTS = {
+    "C7519": ("P3", "ptxas had to insert warpgroup.arrive (wgmma fences): registers used by wgmma are "
+                    "touched by other code between MMA issues. Keep the accumulator in the WGMMA layout "
+                    "through the loop and avoid reading it before plgpu.wgmma_wait."),
+    "C7510": ("P3", "ptxas serialized wgmma.mma_async: the MMA pipeline cannot overlap. Usually caused by "
+                    "accumulator registers being accessed between wgmma issues or by register pressure."),
+}
+
+
+def _advisories(rows: _Rows) -> list[Fix]:
+    fixes = []
+    for r in rows.prefixed("L5.ptxas_"):
+        code = r.context.get("code", r.key.rsplit("_", 1)[-1])
+        phase, hint = _ADVISORY_HINTS.get(code, ("P5", "See the ptxas message."))
+        side = "candidate" if r.cand else "reference"
+        keys, w, layers = rows.take([r])
+        fixes.append(Fix(phase, "investigate", f"ptxas advisory {code} only in the {side}",
+                         f"{hint} ({r.message})", keys, w, layers))
+    return fixes
+
+
 def _simple(key: str, phase: str, tag: str, title, detail) -> callable:
     def rule(rows: _Rows) -> Fix | None:
         r = rows.get(key)
@@ -159,12 +217,19 @@ def _wait_detail(r: Discrepancy) -> str:
 
 
 def _setmaxnreg_detail(r: Discrepancy) -> str:
-    dec = next((n for d, n in (r.ref or []) if d == "dec"), None)
-    inc = next((n for d, n in (r.ref or []) if d == "inc"), None)
-    s = f"Reference rebalances registers (producer {dec}, consumers {inc}). "
-    if dec is not None:
-        s += f"Set memory_registers={dec} on plgpu.emit_pipeline_warp_specialized, "
-    return s + "or call plgpu.set_max_registers per warp role."
+    def split(pairs):
+        pairs = pairs or []
+        return (next((n for d, n in pairs if d == "dec"), None), next((n for d, n in pairs if d == "inc"), None))
+
+    (r_dec, r_inc), (c_dec, c_inc) = split(r.ref), split(r.cand)
+    if r.ref:
+        s = f"Reference rebalances registers (producer {r_dec}, compute {r_inc})"
+        s += f"; candidate {c_dec}/{c_inc}. " if r.cand else "; candidate does not. "
+        if r_dec is not None:
+            s += f"Set memory_registers={r_dec} on plgpu.emit_pipeline_warp_specialized, or "
+        return s + "call plgpu.set_max_registers per warp role."
+    return (f"Candidate rebalances registers (producer {c_dec}, compute {c_inc}) where the reference does "
+            "not. This comes with its producer warpgroup; it goes away if that structure does.")
 
 
 _SIMPLE_RULES = [
@@ -182,10 +247,6 @@ _SIMPLE_RULES = [
     _simple("L2.mma_wait_depth", "P3", "knob", lambda r: f"MMA drained every step (wait {r.cand}; reference {r.ref})",
             _wait_detail),
     _simple("L0.setmaxnreg", "P4", "knob", "Register rebalancing differs", _setmaxnreg_detail),
-    _simple("L2.persistent", "P4", "rewrite", "Persistent tile loop differs",
-            lambda r: ("Launch one CTA per SM and loop over output tiles with plgpu.nd_loop (or "
-                       "plgpu.dynamic_scheduling_loop on sm_100a).") if r.ref else
-            "Candidate is persistent where the reference is not; compare tail effects before keeping it."),
     _simple("L1.epilogue_store", "P4", "rewrite", "Epilogue store path differs",
             lambda r: (f"Reference epilogue: {r.ref}; candidate: {r.cand}. For TMA stores: plgpu.commit_smem(); "
                        "plgpu.copy_smem_to_gmem(...); plgpu.wait_smem_to_gmem(n), overlapping the next tile.")),
@@ -215,9 +276,10 @@ _SIMPLE_RULES = [
 def diagnose(report: DiffReport) -> list[Fix]:
     rows = _Rows(report)
     fixes: list[Fix] = []
-    for rule in (_warp_structure, _spills, _cluster_multicast, *_SIMPLE_RULES):
+    for rule in (_warp_structure, _spills, _cluster_multicast, _persistence, *_SIMPLE_RULES):
         if (fix := rule(rows)) is not None:
             fixes.append(fix)
+    fixes.extend(_advisories(rows))
     for r in rows.prefixed("L4."):
         keys, w, layers = rows.take([r])
         fixes.append(Fix("P5", "rewrite", f"FP flavor differs: {r.key[3:]}", r.message, keys, w, layers))

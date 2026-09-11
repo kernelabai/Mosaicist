@@ -40,6 +40,54 @@ def test_nested_loops_and_spin_detection():
     assert not any(op.startswith("mbarrier") for op in (i.opcode for i in cfg.own_instrs(outer)))
 
 
+CUTLASS_WAITS = """.version 8.8
+.target sm_90a
+.address_size 64
+.visible .entry k()
+{
+	mov.u32 %r1, 0;
+$L__BB0_12:
+	add.s32 %r5, %r1, 1;
+	{
+	.reg .pred P1;
+	LAB_WAIT:
+	mbarrier.try_wait.parity.shared::cta.b64 P1, [%r3], %r4;
+	@P1 bra.uni DONE;
+	bra.uni     LAB_WAIT;
+	DONE:
+	}
+	wgmma.fence.sync.aligned;
+	add.s32 %r1, %r1, 1;
+	setp.lt.s32 %p2, %r1, 16;
+	@%p2 bra $L__BB0_12;
+	{
+	.reg .pred P1;
+	LAB_WAIT:
+	mbarrier.try_wait.parity.shared::cta.b64 P1, [%r6], %r4;
+	@P1 bra.uni DONE;
+	bra.uni     LAB_WAIT;
+	DONE:
+	}
+	ret;
+}
+"""
+
+
+def test_scoped_inline_asm_labels_resolve_to_their_own_scope():
+    """CUTLASS reuses LAB_WAIT/DONE in every wait scope; each branch must stay in its scope."""
+    fn = parse(CUTLASS_WAITS).entry()
+    bras = [i for i in fn.instrs if i.base == "bra"]
+    first_scope_targets = {bras[0].operands[0], bras[1].operands[0]}
+    last_scope_targets = {bras[3].operands[0], bras[4].operands[0]}
+    assert first_scope_targets.isdisjoint(last_scope_targets)
+    assert bras[2].operands[0] == "$L__BB0_12"  # function-scope labels keep their names
+    cfg = build_cfg(fn)
+    structural = cfg.structural_loops()
+    assert len(structural) == 1 and len([lp for lp in cfg.loops if lp.spin]) == 2
+    own = [i.opcode for i in cfg.own_instrs(structural[0])]
+    assert any(op.startswith("mbarrier.try_wait") for op in own)
+
+
 def test_dominators_and_unconditional_branches():
     cfg = build_cfg(parse(NESTED).entry())
     assert cfg.idom[0] == 0

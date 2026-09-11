@@ -3,6 +3,7 @@
     mosaicist fingerprint KERNEL.ptx|BUNDLE_DIR [--json]
     mosaicist diff REF CAND [--ref-log F] [--cand-log F] [--json]
     mosaicist check REF.npy CAND.npy ORACLE.npy --fmt bf16 [--json]
+    mosaicist time REF_BUNDLE CAND_BUNDLE... [--aa REF_BUNDLE2 ...]
 
 REF / CAND are PTX files or bundle directories (containing bundle.json).
 """
@@ -81,6 +82,24 @@ def _cmd_diff(args) -> int:
     return 0
 
 
+def _cmd_time(args) -> int:
+    from .bench.stats import MIN_NOISE, noise_floor, summarize, verdict
+
+    ref = Bundle.load(args.ref)
+    batches = [ref.timings] + [Bundle.load(p).timings for p in args.aa]
+    noise = noise_floor(batches) if len(batches) > 1 else MIN_NOISE
+    t_ref = summarize(ref.timings)
+    src = f"A/A over {len(batches)} reference runs" if len(batches) > 1 else "default floor; pass --aa for a measured one"
+    print(f"noise floor {noise:.1%} ({src})")
+    print(f"  {'reference':<28} {t_ref.median:9.1f} us  [{t_ref.ci_low:.1f}, {t_ref.ci_high:.1f}]  n={t_ref.n}")
+    for p in args.cands:
+        b = Bundle.load(p)
+        t = summarize(b.timings)
+        print(f"  {Path(p).name:<28} {t.median:9.1f} us  [{t.ci_low:.1f}, {t.ci_high:.1f}]  n={t.n}  "
+              f"{t.median / t_ref.median:5.3f}x  {verdict(t.median, t_ref.median, noise)}")
+    return 0
+
+
 def _cmd_check(args) -> int:
     import numpy as np
 
@@ -115,6 +134,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--cand-entry")
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=_cmd_diff)
+
+    p = sub.add_parser("time", help="compare device times across bundles against a measured noise floor")
+    p.add_argument("ref", help="reference bundle directory")
+    p.add_argument("cands", nargs="+", help="candidate bundle directories")
+    p.add_argument("--aa", nargs="*", default=[], help="extra reference runs (A/A) for the noise floor")
+    p.set_defaults(func=_cmd_time)
 
     p = sub.add_parser("check", help="run the numerics gate on saved outputs (.npy)")
     p.add_argument("ref")

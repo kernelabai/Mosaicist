@@ -262,11 +262,24 @@ def _parse_header(header: str, line: int) -> Function:
 
 
 class _BodyParser:
+    """Flattens nested `{ }` scopes into one stream, keeping labels scope-correct.
+
+    PTX labels are scoped to their block, and CUTLASS inline asm reuses local
+    names (`LAB_WAIT:` / `DONE:`) in every mbarrier-wait scope. Labels defined
+    inside a nested scope are renamed `name@<scope>`, and each branch target is
+    resolved against the innermost enclosing scope that defines it.
+    """
+
     def __init__(self, fn: Function, files: dict[int, str], line_of):
         self.fn = fn
         self.files = files
         self.line_of = line_of
         self.loc: Loc | None = None
+        self.n_instrs = 0
+        self.scopes = [0]  # stack of open scope ids; 0 is the function body
+        self.next_scope = 1
+        self.scope_labels: dict[int, set[str]] = {0: set()}
+        self.branches: list[tuple[Instr, tuple[int, ...]]] = []
 
     def feed(self, body: str, base: int) -> None:
         """Parse the text between an entry's outer braces; `base` is its offset."""
@@ -278,21 +291,40 @@ class _BodyParser:
                 self._statement(chunk, base + start)
                 start = pos + 1
                 continue
-            # A brace at statement start opens/closes a scope (flattened); one
-            # after an opcode belongs to a vector operand like {%f1, %f2}.
+            # A brace at statement start opens/closes a scope; one after an
+            # opcode belongs to a vector operand like {%f1, %f2}.
             labels, rest = _split_labels(chunk)
             if rest.strip():
                 continue
             self._emit_labels(labels, base + start)
+            if c == "{":
+                self.scopes.append(self.next_scope)
+                self.scope_labels[self.next_scope] = set()
+                self.next_scope += 1
+            elif len(self.scopes) > 1:
+                self.scopes.pop()
             start = pos + 1
         labels, rest = _split_labels(body[start:])
         if rest.strip():
             raise PTXParseError(f"unterminated statement near line {self.line_of(base + start)}")
         self._emit_labels(labels, base + start)
+        self._resolve_branches()
 
     def _emit_labels(self, labels: list[tuple[str, int]], offset: int) -> None:
+        scope = self.scopes[-1]
         for name, rel in labels:
-            self.fn.body.append(Label(name, self.line_of(offset + rel)))
+            self.scope_labels[scope].add(name)
+            qualified = name if scope == 0 else f"{name}@{scope}"
+            self.fn.body.append(Label(qualified, self.line_of(offset + rel)))
+
+    def _resolve_branches(self) -> None:
+        for ins, stack in self.branches:
+            target = ins.operands[-1]
+            for scope in reversed(stack):
+                if target in self.scope_labels.get(scope, ()):
+                    if scope != 0:
+                        ins.operands[-1] = f"{target}@{scope}"
+                    break
 
     def _statement(self, chunk: str, offset: int) -> None:
         # Labels may prefix the statement; account for their width in line numbers.
@@ -314,9 +346,11 @@ class _BodyParser:
         pieces = stmt.split(None, 1)
         opcode = pieces[0]
         operands = split_top_level(pieces[1]) if len(pieces) > 1 else []
-        self.fn.body.append(
-            Instr(len(self.fn.instrs), opcode, operands, pred, line, self.loc)
-        )
+        ins = Instr(self.n_instrs, opcode, operands, pred, line, self.loc)
+        self.n_instrs += 1
+        self.fn.body.append(ins)
+        if opcode.split(".", 1)[0] == "bra" and operands:
+            self.branches.append((ins, tuple(self.scopes)))
 
     def _directive(self, stmt: str, line: int) -> None:
         word = stmt.split(None, 1)[0]

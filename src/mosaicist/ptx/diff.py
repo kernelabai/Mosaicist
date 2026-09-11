@@ -39,8 +39,9 @@ class LoopPair:
     ref_role: str
     cand_role: str
     alignment: Alignment
+    ref_index: list[int]  # alignment position -> index into the reference loop's tokens
     cand_index: list[int]  # alignment position -> index into the candidate loop's tokens
-    projected: bool  # candidate loop was fused; only the ref role's ops were compared
+    projected: str | None  # "ref" or "cand" if that side's fused loop was projected onto one role
 
 
 @dataclass
@@ -94,6 +95,7 @@ _COMPATIBLE = {
     "load": ("load", "mma+load"),
     "store": ("store",),
     "outer": ("outer",),
+    "other": ("other",),
 }
 
 
@@ -102,17 +104,22 @@ _PRODUCER_KINDS = {"mbar.arrive_tx", "mbar.expect_tx", "tma.load", "cp.async", "
 _SHARED_KINDS = {"mbar.wait"}  # a fused loop's single wait serves both roles
 
 
-def _project(cl: LoopFP, ref_role: str) -> tuple[list[str], list[int], bool]:
-    """Tokens of a fused (mma+load) candidate loop that belong to `ref_role`."""
-    if cl.role != "mma+load" or ref_role not in ("mma", "load"):
-        return cl.tokens, list(range(len(cl.tokens))), False
+def _project(lp: LoopFP, other_role: str) -> tuple[list[str], list[int], bool]:
+    """Tokens of a fused (mma+load) loop that belong to `other_role`.
+
+    When one kernel fuses producer and consumer work into one loop and the
+    other splits them across warp roles, each side's loop is compared only
+    with the matching half of the fused loop.
+    """
+    if lp.role != "mma+load" or other_role not in ("mma", "load"):
+        return lp.tokens, list(range(len(lp.tokens))), False
     keep = []
-    for i, t in enumerate(cl.tokens):
+    for i, t in enumerate(lp.tokens):
         kind = token_kind(t)
         is_producer = kind in _PRODUCER_KINDS
-        if kind in _SHARED_KINDS or (is_producer if ref_role == "load" else not is_producer):
+        if kind in _SHARED_KINDS or (is_producer if other_role == "load" else not is_producer):
             keep.append(i)
-    return [cl.tokens[i] for i in keep], keep, True
+    return [lp.tokens[i] for i in keep], keep, True
 
 
 def _pair_loops(ref: Fingerprint, cand: Fingerprint) -> list[LoopPair]:
@@ -123,10 +130,13 @@ def _pair_loops(ref: Fingerprint, cand: Fingerprint) -> list[LoopPair]:
             continue
         scored = []
         for cl in options:
-            toks, idx, projected = _project(cl, rl.role)
-            scored.append((cl, align(rl.tokens, toks), idx, projected))
-        cl, aln, idx, projected = max(scored, key=lambda x: (x[1].similarity, -abs(x[0].depth - rl.depth)))
-        pairs.append(LoopPair(rl.id, cl.id, rl.role, cl.role, aln, idx, projected))
+            r_toks, r_idx, r_proj = _project(rl, cl.role)
+            c_toks, c_idx, c_proj = _project(cl, rl.role)
+            projected = "ref" if r_proj else "cand" if c_proj else None
+            scored.append((cl, align(r_toks, c_toks), r_idx, c_idx, projected))
+        cl, aln, r_idx, c_idx, projected = max(
+            scored, key=lambda x: (x[1].similarity, -abs(x[0].depth - rl.depth)))
+        pairs.append(LoopPair(rl.id, cl.id, rl.role, cl.role, aln, r_idx, c_idx, projected))
     return pairs
 
 
@@ -136,8 +146,13 @@ def diff(ref: Fingerprint, cand: Fingerprint) -> DiffReport:
 
     # ---- L0 skeleton ----
     if rs["warpgroups"] and cs["warpgroups"]:
+        r_ws, c_ws = ref.structure["warp_specialized"], cand.structure["warp_specialized"]
+        r_comp, c_comp = rs["warpgroups"] - int(r_ws), cs["warpgroups"] - int(c_ws)
+        roles = lambda total, ws: f"{total} ({total - 1} compute + 1 producer)" if ws else f"{total} (all compute)"
         d.check("L0", "L0.warpgroups", rs["warpgroups"], cs["warpgroups"], 3.0,
-                f"warpgroups per CTA: reference {rs['warpgroups']}, candidate {cs['warpgroups']}")
+                f"warpgroups per CTA: reference {roles(rs['warpgroups'], r_ws)}, "
+                f"candidate {roles(cs['warpgroups'], c_ws)}",
+                context={"ref_compute": r_comp, "cand_compute": c_comp, "ref_ws": r_ws, "cand_ws": c_ws})
     d.check("L0", "L0.cluster", rs["cluster"], cs["cluster"], 2.0,
             f"cluster shape: reference {rs['cluster']}, candidate {cs['cluster']}")
     d.check("L0", "L0.setmaxnreg", rs["setmaxnreg"], cs["setmaxnreg"], 2.0,
@@ -229,16 +244,18 @@ def diff(ref: Fingerprint, cand: Fingerprint) -> DiffReport:
         diffs = p.alignment.differences()
         if not diffs:
             continue
-        summary = _summarize(diffs, rl, cl, p.cand_index)
-        scope = f" ({rl.role}-side ops of the fused loop)" if p.projected else ""
+        summary = _summarize(diffs, rl, cl, p.ref_index, p.cand_index)
+        scope = {"ref": f" (only the {cl.role}-side ops of the reference's fused loop)",
+                 "cand": f" (only the {rl.role}-side ops of the candidate's fused loop)"}.get(p.projected, "")
+        ri = [p.ref_index[s.ref] for s in diffs if s.ref is not None]
         d.rows.append(Discrepancy(
-            "L3", f"L3.order[{rl.id}]", rl.tokens, [cl.tokens[i] for i in p.cand_index],
+            "L3", f"L3.order[{rl.id}]", [rl.tokens[i] for i in p.ref_index], [cl.tokens[i] for i in p.cand_index],
             round(2.0 * (1 - p.alignment.similarity), 3),
             f"{rl.role} loop (ref line {rl.header_line}) vs candidate {cl.role} loop "
             f"(line {cl.header_line}){scope}, similarity {p.alignment.similarity:.2f}: {summary}",
-            ref_lines=[rl.token_lines[s.ref] for s in diffs if s.ref is not None],
+            ref_lines=[rl.token_lines[i] for i in ri],
             cand_lines=[cl.token_lines[p.cand_index[s.cand]] for s in diffs if s.cand is not None],
-            ref_locs=[rl.token_locs[s.ref] for s in diffs if s.ref is not None and rl.token_locs[s.ref]],
+            ref_locs=[rl.token_locs[i] for i in ri if rl.token_locs[i]],
             context={"ref_role": rl.role, "cand_role": cl.role, "projected": p.projected},
         ))
 
@@ -268,6 +285,12 @@ def diff(ref: Fingerprint, cand: Fingerprint) -> DiffReport:
                 f"register spills: reference {r_spill if rm else 'unknown'} "
                 f"(bytes/STL), candidate {c_spill}",
                 differs=(c_spill > 0 and r_spill == 0) or (r_spill > 0 and c_spill == 0 and bool(cm)))
+    r_adv = {a.split(":", 1)[0]: a for a in rm.get("ptxas_advisories", [])}
+    c_adv = {a.split(":", 1)[0]: a for a in cm.get("ptxas_advisories", [])}
+    for code in sorted(set(r_adv) | set(c_adv)):
+        side, text = ("candidate", c_adv[code]) if code in c_adv else ("reference", r_adv[code])
+        d.check("L5", f"L5.ptxas_{code}", code in r_adv, code in c_adv, 2.0,
+                f"ptxas advisory only in the {side}: {text}", context={"code": code})
     if rm.get("registers") and cm.get("registers"):
         d.check("L5", "L5.registers", rm["registers"], cm["registers"], 1.0,
                 f"registers/thread: reference {rm['registers']}, candidate {cm['registers']}",
@@ -290,13 +313,13 @@ def _contraction(fp: dict[str, int]) -> float | None:
     return None if total == 0 else fma / (fma + (mul + add) / 2)
 
 
-def _summarize(diffs, rl: LoopFP, cl: LoopFP, cand_index: list[int]) -> str:
+def _summarize(diffs, rl: LoopFP, cl: LoopFP, ref_index: list[int], cand_index: list[int]) -> str:
     parts = []
     for s in diffs:
         if s.op == "subst":
-            parts.append(f"{rl.tokens[s.ref]} -> {cl.tokens[cand_index[s.cand]]}")
+            parts.append(f"{rl.tokens[ref_index[s.ref]]} -> {cl.tokens[cand_index[s.cand]]}")
         elif s.op == "del":
-            parts.append(f"missing {rl.tokens[s.ref]}")
+            parts.append(f"missing {rl.tokens[ref_index[s.ref]]}")
         else:
             parts.append(f"extra {cl.tokens[cand_index[s.cand]]}")
     # collapse runs of identical descriptions

@@ -1,0 +1,7 @@
+ptxas info    : (C7519) warpgroup.arrive is injected in around line 792 by compiler to allow use of registers in GMMA in function 'anonymous_mosaic_gpu_kernel'
+ptxas info    : 0 bytes gmem
+ptxas info    : Compiling entry function 'anonymous_mosaic_gpu_kernel' for 'sm_90a'
+ptxas info    : Function properties for anonymous_mosaic_gpu_kernel
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 168 registers, used 16 barriers, 1 bytes smem
+ptxas info    : Compile time = 172.589 ms

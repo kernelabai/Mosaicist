@@ -12,10 +12,30 @@ Converge a Pallas Mosaic GPU kernel on a CuTeDSL reference kernel. The reference
 | Numerics gate, input suites, guard bands | §6 | done, tested |
 | Timing statistics, noise floor, acceptance rule, beam | §8–9 | done, tested |
 | Bundle schema | §4 | done |
-| Capture workers (CuTeDSL, Pallas), CUPTI timing, `ncu` | §4, §9 | not started; needs a Linux host with an sm_90a/sm_100a GPU |
+| CUPTI launch records + device timing (`bench/cupti_trace.py`), `mosaicist time` | §4, §9 | done; used on an H100 |
+| Capture harnesses for one kernel pair (`experiments/hopper_gemm/`) | §4 | prototype; generalizing them into workers is next |
+| `ncu` profiling | §9 | not started; needs profiling permissions on the host |
 | Naive translator, knob tuner, LLM rewriter, loop driver | §5, §8 | not started |
 
-The GEMM fixtures in `tests/fixtures/` are hand-abbreviated PTX modeled on the two compilers' output, not real compiler output. Checking the fingerprint rules against real CuTeDSL and Mosaic GPU PTX is the first job once a GPU host is available.
+`tests/fixtures/*.ptx` are hand-abbreviated examples. `tests/fixtures/real/` holds real compiler output captured on an H100.
+
+## First H100 run (2026-09-11)
+
+CuTeDSL `hopper/kernel/dense_gemm.py` (CUTLASS 4.7.1) vs Pallas `hopper_matmul_mgpu.py` (JAX 0.11.1). Both run fp16 8192³ with a 128×256 CTA tile and a 2×1 cluster, on an H100 PCIe with unlocked clocks.
+
+| | median | vs ref | numerics |
+|---|---|---|---|
+| CuTeDSL reference | 2477.7 µs | — | — |
+| Pallas as shipped | 2457.3 µs | 0.992× | 100.0% bit-identical |
+| Pallas + `delay_release=1` (Diagnose's P3 fix) | 2486.4 µs | 1.004× | 100.0% bit-identical |
+
+The noise floor from three A/A runs of the reference is 5.8%, so every row counts as *equal*. The P3 fix closes its fingerprint row, raises mainloop alignment from 0.64 to 0.73, and lowers D from 0.497 to 0.438. It has no runtime effect this noise floor can resolve. Real PTX surfaced bugs the hand-written fixtures hid, all now fixed and covered by `tests/test_real_ptx.py`:
+
+- Scoped inline-asm labels (`LAB_WAIT`/`DONE`) were resolved across scopes, so no loops were found.
+- A prefetch prologue was mistaken for warp specialization.
+- Persistent tile loops hid warp specialization and were mislabeled as producer loops.
+
+Reproduce with `experiments/hopper_gemm/{gen_inputs,ref_cutedsl,cand_pallas}.py`. Each script's docstring has its invocation. Use one pinned `ptxas` (≥ 12.9, for PTX ISA 8.8) for both kernels.
 
 ## Usage
 

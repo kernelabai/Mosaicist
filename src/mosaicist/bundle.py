@@ -35,7 +35,8 @@ class Bundle:
     sass: str | None = None
     source: str | None = None  # kernel source file
     launch: Launch = field(default_factory=Launch)
-    timings: list[float] = field(default_factory=list)  # device-time samples
+    timings: list[float] = field(default_factory=list)  # device-time samples (us)
+    resources: dict = field(default_factory=dict)  # as loaded by the driver: registers, smem, local mem
     versions: dict[str, str] = field(default_factory=dict)  # cutlass / jax / ptxas / driver
     root: Path | None = field(default=None, repr=False, compare=False)
 
