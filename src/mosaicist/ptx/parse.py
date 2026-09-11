@@ -121,13 +121,25 @@ class Module:
         return [f for f in self.functions if f.kind == "entry"]
 
     def entry(self, name: str | None = None) -> Function:
-        """Return the named entry, the only entry, or the largest one."""
+        """Return the named entry, the only entry, or the largest one.
+
+        `name` may also be a substring that matches exactly one entry (useful for
+        mangled C++ template names); substrings matching several entries are an error.
+        """
         entries = self.entries
         if name is not None:
             for e in entries:
                 if e.name == name:
                     return e
-            raise KeyError(f"no .entry named {name!r}; have {[e.name for e in entries]}")
+            hits = [e for e in entries if name in e.name]
+            if len({e.name for e in hits}) == 1:
+                # one name, possibly repeated across concatenated modules (e.g. a
+                # trap stub for another arch next to the real kernel): take the largest
+                return max(hits, key=lambda e: len(e.instrs))
+            if len(hits) > 1:
+                raise KeyError(f"{name!r} matches {len(hits)} entries; be more specific: "
+                               f"{[e.name[:80] for e in hits]}")
+            raise KeyError(f"no .entry named {name!r}; have {[e.name[:80] for e in entries]}")
         if not entries:
             raise ValueError("module has no .entry functions")
         return max(entries, key=lambda e: len(e.instrs))
@@ -366,8 +378,38 @@ class _BodyParser:
             self.fn.shared.append(decl)
 
 
+def split_modules(text: str) -> list[str]:
+    """Split concatenated PTX (e.g. `cuobjdump -ptx` output) into one text per module.
+
+    Everything before each module's `.version` line (cuobjdump banners such as
+    "Fatbin ptx code:", "arch = sm_90a") is dropped.
+    """
+    starts = [m.start() for m in re.finditer(r"^[ \t]*\.version\b", text, re.M)]
+    if not starts:
+        return [text]
+    return [text[s:e] for s, e in zip(starts, starts[1:] + [len(text)])]
+
+
+def _strip_banners(text: str) -> str:
+    """Drop cuobjdump banner lines between modules; keep line count (blank them)."""
+    out = []
+    for ln in text.splitlines(keepends=True):
+        s = ln.strip()
+        if s.startswith(("Fatbin ", "=====", "arch = ", "code version = ", "host = ", "compile_size = ",
+                         "producer = ", "identifier = ")):
+            out.append("\n" if ln.endswith("\n") else "")
+        else:
+            out.append(ln)
+    return "".join(out)
+
+
 def parse(text: str) -> Module:
-    """Parse PTX text into a Module."""
+    """Parse PTX text into a Module.
+
+    Concatenated modules (cuobjdump output) are parsed into one Module whose
+    entries are the union; header fields come from the last module.
+    """
+    text = _strip_banners(text)
     # Terminate newline-delimited directives with ';' so one scanner handles all
     # statements. Appending before the newline keeps line numbers intact.
     clean = _LINE_DIRECTIVE_RE.sub(r"\1;", _strip_comments(text))
