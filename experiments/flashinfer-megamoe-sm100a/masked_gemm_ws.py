@@ -333,3 +333,121 @@ def masked_grouped_gemm_w1(
             plgpu.Barrier(orders_tensor_core=True),
         ],
     )(a_q, a_sf, b_q, b_sf, alpha, masked_m)
+
+
+def masked_grouped_gemm_w1p(
+    a_q: jax.Array, a_sf: jax.Array, b_q: jax.Array, b_sf: jax.Array,
+    alpha: jax.Array, masked_m: jax.Array, config: GemmConfig = GemmConfig(),
+) -> jax.Array:
+    """`masked_grouped_gemm_w1` made persistent: one warpgroup, walking tiles.
+
+    The contract extracted from the CuTeDSL reference says it runs `grid=[1,1,148]` --
+    one block per SM -- with 192 threads. Persistent and warp-specialized. This port had
+    tried each separately: warp specialization inside one warpgroup was the only
+    structural change that ever helped, and persistence had only been tried alongside
+    *two* warpgroups, where the extra 128 threads cost more than the scheduling saved.
+
+    So: keep the 128 threads and the warp split, and add the tile loop. Blocks launch
+    once and walk work items, which amortizes the prologue over several tiles and leaves
+    the weights of neighbouring tiles in L2.
+
+    The stage buffers are reused across tiles, so the mainloop drains every `consumed`
+    barrier before the next tile fetches -- the same accounting the two-warpgroup
+    version needed, and for the same reason.
+    """
+    l, m, k = a_q.shape
+    _, n, _ = b_q.shape
+    tm, tn = TMEM_ROWS, config.tile_n
+    bk, stages = _resolve_w1(config, k, tm, tn)
+    if m % tm or n % tn or k % bk:
+        raise ValueError(f"({m}, {n}, {k}) must be tiled by ({tm}, {tn}, {bk})")
+    num_kb = k // bk
+    sf_tiles, k_scales = bk // SF_TILE_K, bk // SF_VEC_SIZE
+    n_tiles = tn // TMEM_ROWS
+    ab_transforms = _fp4_transforms(bk)
+
+    def body(a_gmem, asf_gmem, b_gmem, bsf_gmem, alpha_gmem, mask_gmem, out_gmem,
+             a_smem, b_smem, asf_smem, bsf_smem, out_smem,
+             acc_tmem, asf_tmem, bsf_tmem, ab_barrier, consumed, mma_done):
+
+        @plgpu.dynamic_scheduling_loop(grid_names=("l", "mi", "ni"))
+        def _tile(info):
+            e, mi, ni = info.index
+            m_slice, n_slice = pl.ds(mi * tm, tm), pl.ds(ni * tn, tn)
+
+            @pl.when(mi * tm < mask_gmem[e])
+            def _():
+                @plgpu.warp_map
+                def _per_warp(warp_id):
+                    @pl.when(warp_id == TMA_WARP)
+                    def _memory():
+                        def _fetch(kb, _):
+                            slot = lax.rem(kb, stages)
+                            ks = pl.ds(kb * bk, bk)
+                            sfs = pl.ds(kb * sf_tiles, sf_tiles)
+
+                            @pl.when(kb >= stages)
+                            def _():
+                                plgpu.barrier_wait(consumed.at[slot])
+
+                            plgpu.copy_gmem_to_smem(a_gmem.at[e, m_slice, ks],
+                                                    a_smem.at[slot], ab_barrier.at[slot])
+                            plgpu.copy_gmem_to_smem(b_gmem.at[e, n_slice, ks],
+                                                    b_smem.at[slot], ab_barrier.at[slot])
+                            plgpu.copy_gmem_to_smem(asf_gmem.at[e, mi, sfs],
+                                                    asf_smem.at[slot, 0], ab_barrier.at[slot])
+                            plgpu.copy_gmem_to_smem(
+                                bsf_gmem.at[e, pl.ds(ni * n_tiles, n_tiles), sfs],
+                                bsf_smem.at[slot], ab_barrier.at[slot])
+                            return 0
+
+                        lax.fori_loop(0, num_kb, _fetch, 0)
+                        # leave the ring balanced for the next tile
+                        for i in range(min(stages, num_kb)):
+                            plgpu.barrier_wait(
+                                consumed.at[(num_kb - min(stages, num_kb) + i) % stages])
+
+                    @pl.when(warp_id == MMA_WARP)
+                    def _compute():
+                        def _mma(kb, _):
+                            slot = lax.rem(kb, stages)
+                            plgpu.barrier_wait(ab_barrier.at[slot])
+                            plgpu.async_copy_scales_to_tmem(asf_smem.at[slot], asf_tmem)
+                            plgpu.async_copy_scales_to_tmem(bsf_smem.at[slot], bsf_tmem)
+                            plgpu.tcgen05_mma(
+                                acc_tmem, a_smem.at[slot],
+                                plgpu.transpose_ref(b_smem.at[slot], (1, 0)),
+                                consumed.at[slot], a_scale=asf_tmem, b_scale=bsf_tmem,
+                                accumulate=kb > 0)
+                            return 0
+
+                        lax.fori_loop(0, num_kb, _mma, 0)
+                        plgpu.tcgen05_commit_arrive(mma_done)
+
+                plgpu.barrier_wait(mma_done)
+                acc = plgpu.async_load_tmem(acc_tmem)
+                plgpu.wait_load_tmem()
+                out_smem[...] = (acc * alpha_gmem[e]).astype(jnp.bfloat16)
+                plgpu.commit_smem()
+                plgpu.copy_smem_to_gmem(out_smem, out_gmem.at[e, m_slice, n_slice])
+                plgpu.wait_smem_to_gmem(0)
+
+    return plgpu.kernel(
+        body,
+        out_shape=jax.ShapeDtypeStruct((l, m, n), jnp.bfloat16),
+        grid=(l, m // tm, n // tn), grid_names=("l", "mi", "ni"),
+        scratch_shapes=[
+            plgpu.SMEM((stages, tm, bk), FP4_DTYPE, transforms=ab_transforms),
+            plgpu.SMEM((stages, tn, bk), FP4_DTYPE, transforms=ab_transforms),
+            plgpu.SMEM((stages, 1, sf_tiles, 32, 16), SF_DTYPE),
+            plgpu.SMEM((stages, n_tiles, sf_tiles, 32, 16), SF_DTYPE),
+            plgpu.SMEM((tm, tn), jnp.bfloat16),
+            plgpu.TMEM((tm, tn), jnp.float32),
+            plgpu.TMEM((TMEM_ROWS, k_scales), SF_DTYPE,
+                       layout=plgpu.TMEMLayout.SCALES_LAYOUT),
+            plgpu.TMEM((tn, k_scales), SF_DTYPE, layout=plgpu.TMEMLayout.SCALES_LAYOUT),
+            plgpu.Barrier(num_arrivals=4, num_barriers=stages),
+            plgpu.Barrier(num_barriers=stages, orders_tensor_core=True),
+            plgpu.Barrier(orders_tensor_core=True),
+        ],
+    )(a_q, a_sf, b_q, b_sf, alpha, masked_m)

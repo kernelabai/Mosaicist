@@ -124,11 +124,18 @@ def load_build(entry: str):
     return fn
 
 
-def time_and_record(fn, args, reps: int, warmup: int) -> tuple[list[float], dict, Launch, object]:
-    """Run the kernel under CUPTI, returning per-rep device times and the launch record.
+def time_and_record(fn, args, reps: int, warmup: int,
+                    measure: str = "dominant") -> tuple[list[float], dict, Launch, object]:
+    """Run under CUPTI, returning per-rep device times and the launch record.
 
-    The kernel that dominates device time is the one measured: a step may launch small
-    helpers around it, and those are not what is being converged.
+    `measure="dominant"` times only the kernel that dominates device time, which is what
+    you want when converging one kernel that happens to be surrounded by small helpers.
+    `measure="all"` sums every kernel in the step, which is what you want when the thing
+    being converged is a pipeline: timing a four-kernel MoE by its largest kernel
+    reported 29.4 us for a path that takes 46.
+
+    The launch record always describes the dominant kernel, since that is the one whose
+    grid and occupancy the fingerprint is about.
     """
     from .bench.cupti_trace import KernelTrace
 
@@ -147,7 +154,12 @@ def time_and_record(fn, args, reps: int, warmup: int) -> tuple[list[float], dict
     if not by_name:
         return [], {}, Launch(), out
     main = max(by_name.values(), key=lambda rs: sum(r.duration_us for r in rs))
-    per_rep = [sum(r.duration_us for r in main[i::reps]) for i in range(min(reps, len(main)))]
+    if measure == "all":
+        total = sum(r.duration_us for r in tr.records)
+        per_rep = [total / reps] * reps
+    else:
+        per_rep = [sum(r.duration_us for r in main[i::reps])
+                   for i in range(min(reps, len(main)))]
     rec = main[0]
     launch = Launch(grid=list(rec.grid), block=list(rec.block), cluster=list(rec.cluster),
                     dynamic_smem=rec.dynamic_smem)
@@ -216,7 +228,8 @@ def versions(compiler: str) -> dict[str, str]:
 
 def capture(entry: str, compiler: str, outdir: str | Path, *, name: str | None = None,
             reps: int = 30, warmup: int = 5, arch: str | None = None,
-            prefer: str | None = None, save_outputs: bool = True) -> Bundle:
+            prefer: str | None = None, save_outputs: bool = True,
+            measure: str = "dominant") -> Bundle:
     """Run one kernel with dumping on and write a bundle to `outdir`.
 
     Must run in a process whose environment already has the dump switches set -- see
@@ -228,7 +241,7 @@ def capture(entry: str, compiler: str, outdir: str | Path, *, name: str | None =
     dump_dir.mkdir(parents=True, exist_ok=True)
 
     fn, args = load_build(entry)()
-    times, resources, launch, result = time_and_record(fn, args, reps, warmup)
+    times, resources, launch, result = time_and_record(fn, args, reps, warmup, measure)
     found = collect_artifacts(compiler, dump_dir, out, prefer)
 
     if save_outputs and result is not None:
@@ -261,7 +274,7 @@ def capture(entry: str, compiler: str, outdir: str | Path, *, name: str | None =
 def capture_subprocess(entry: str, compiler: str, outdir: str | Path, *,
                        python: str | None = None, reps: int = 30,
                        extra_env: dict[str, str] | None = None,
-                       timeout: int = 1800) -> Bundle:
+                       timeout: int = 1800, measure: str = "dominant") -> Bundle:
     """Capture in a fresh process, so the dump switches are set before anything imports.
 
     `python` selects the interpreter, which is how a CuTeDSL reference and a Pallas
@@ -274,6 +287,7 @@ def capture_subprocess(entry: str, compiler: str, outdir: str | Path, *,
     env.update(extra_env or {})
     env.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
     cmd = [python or sys.executable, "-m", "mosaicist.cli", "capture", entry,
-           "--compiler", compiler, "--out", str(out), "--reps", str(reps), "--in-process"]
+           "--compiler", compiler, "--out", str(out), "--reps", str(reps),
+           "--measure", measure, "--in-process"]
     subprocess.run(cmd, check=True, env=env, timeout=timeout)
     return Bundle.load(out)

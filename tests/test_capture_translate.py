@@ -257,3 +257,39 @@ def test_contract_still_infers_a_tile_from_a_tiled_launch(tmp_path):
     assert c.tile == {"m": 128, "n": 128}
     assert not any("persistent" in d for d in c.deferred)
     assert not any("warp specialization" in d for d in c.deferred)
+
+
+def test_time_and_record_can_sum_a_pipeline_or_isolate_its_biggest_kernel():
+    """Timing a four-kernel MoE by its largest kernel reported 29.4 us for a 46 us path."""
+    from mosaicist.capture import time_and_record
+
+    class Rec:
+        def __init__(self, name, us):
+            self.name, self.duration_us = name, us
+            self.grid = self.block = self.cluster = (1, 1, 1)
+            self.dynamic_smem = self.static_smem = self.registers = 0
+            self.local_mem_per_thread = 0
+
+    records = [Rec("gemm", 10.0), Rec("quantize", 3.0), Rec("silu", 2.0)]
+
+    class FakeTrace:
+        def __enter__(self):
+            self.records = records
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    import mosaicist.bench.cupti_trace as ct
+
+    orig = ct.KernelTrace
+    ct.KernelTrace = FakeTrace
+    try:
+        dom, _, launch, _ = time_and_record(lambda: None, (), reps=1, warmup=0,
+                                            measure="dominant")
+        alls, _, _, _ = time_and_record(lambda: None, (), reps=1, warmup=0, measure="all")
+    finally:
+        ct.KernelTrace = orig
+
+    assert dom == [10.0], "dominant times only the biggest kernel"
+    assert alls == [15.0], "all sums the whole step"

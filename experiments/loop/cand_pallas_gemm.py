@@ -14,7 +14,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "flashinfer
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "src"))
 
 from masked_gemm import GemmConfig, masked_grouped_gemm  # noqa: E402
-from masked_gemm_ws import masked_grouped_gemm_w1  # noqa: E402
+from masked_gemm_ws import masked_grouped_gemm_w1, masked_grouped_gemm_w1p  # noqa: E402
 from mosaicist.converge.knobs import from_env  # noqa: E402
 from nvfp4 import quantize_nvfp4, to_mma_scale_layout  # noqa: E402
 
@@ -25,14 +25,16 @@ KNOBS = {
     "block_k": [128, 256, 512],
     "stages": [1, 2, 3, 4],
     "warp_split": [False, True],
+    "persistent": [False, True],
     "collective": [False, True],
 }
 #: knobs that swap in a different kernel rather than retune this one. The tuner leaves
 #: these alone; the rewriter reaches for them once the parameter knobs are spent, which
 #: is the design's knobs-before-rewrites ordering made concrete.
-STRUCTURAL = ("warp_split", "collective")
+STRUCTURAL = ("warp_split", "persistent", "collective")
 
-DEFAULTS = {"block_k": 128, "stages": 1, "warp_split": False, "collective": False}
+DEFAULTS = {"block_k": 128, "stages": 1, "warp_split": False, "persistent": False,
+            "collective": False}
 
 
 def _inputs():
@@ -64,7 +66,12 @@ def reference():
 def build():
     k = from_env(DEFAULTS)
     cfg = GemmConfig(block_k=k["block_k"], stages=k["stages"], collective=k["collective"])
-    gemm = masked_grouped_gemm_w1 if k["warp_split"] else masked_grouped_gemm
+    if k.get("persistent"):
+        gemm = masked_grouped_gemm_w1p  # persistent implies the warp split
+    elif k["warp_split"]:
+        gemm = masked_grouped_gemm_w1
+    else:
+        gemm = masked_grouped_gemm
 
     a_q, a_sf, b_q, b_sf = _inputs()
     asf, bsf = jax.vmap(to_mma_scale_layout)(a_sf), jax.vmap(to_mma_scale_layout)(b_sf)

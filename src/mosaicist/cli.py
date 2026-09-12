@@ -119,10 +119,10 @@ def _cmd_capture(args) -> int:
 
     if args.in_process:
         b = capture(args.entry, args.compiler, args.out, reps=args.reps, arch=args.arch,
-                    prefer=args.prefer, name=args.name)
+                    prefer=args.prefer, name=args.name, measure=args.measure)
     else:
-        b = capture_subprocess(args.entry, args.compiler, args.out,
-                               python=args.python, reps=args.reps)
+        b = capture_subprocess(args.entry, args.compiler, args.out, python=args.python,
+                               reps=args.reps, measure=args.measure)
     times = sorted(b.timings)
     med = times[len(times) // 2] if times else float("nan")
     print(f"{b.kind} bundle {args.out}: ptx={b.ptx} sass={b.sass} "
@@ -152,7 +152,7 @@ def _cmd_converge(args) -> int:
         knobs_module=args.knobs,
         outdir=args.out,
         config=LoopConfig(max_steps=args.steps, reps=args.reps, python=args.python,
-                          gate_numerics=not args.no_gate),
+                          gate_numerics=not args.no_gate, measure=args.measure),
     )
     print(result.summary())
     return 0 if result.converged else 1
@@ -219,6 +219,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--reps", type=int, default=30)
     p.add_argument("--arch", help="sm_90a / sm_100a, recorded in the bundle")
     p.add_argument("--prefer", help="substring picking the kernel when several are dumped")
+    p.add_argument("--measure", choices=("dominant", "all"), default="dominant",
+                   help="time the dominant kernel, or sum every kernel in the step "
+                        "(use 'all' when converging a multi-kernel pipeline)")
     p.add_argument("--name")
     p.add_argument("--python", help="interpreter for the capture subprocess")
     p.add_argument("--in-process", action="store_true",
@@ -238,6 +241,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--steps", type=int, default=12)
     p.add_argument("--reps", type=int, default=30)
     p.add_argument("--python", help="interpreter for capture subprocesses")
+    p.add_argument("--measure", choices=("dominant", "all"), default="dominant")
     p.add_argument("--no-gate", action="store_true",
                    help="skip the numerics gate: use when the reference and candidate "
                         "cannot be fed identical inputs (different frameworks), and "

@@ -38,6 +38,8 @@ class LoopConfig:
     #: how many batches to split the reference's samples into when measuring it
     noise_batches: int = 4
     gate_numerics: bool = True
+    #: "dominant" times the biggest kernel, "all" sums the step -- see capture.py
+    measure: str = "dominant"
 
 
 @dataclass
@@ -125,7 +127,8 @@ def subprocess_runner(entry: str, config: LoopConfig) -> Runner:
 
     def run(setting: Setting, outdir: Path) -> Bundle:
         return capture_subprocess(entry, "pallas", outdir, python=config.python,
-                                  reps=config.reps, extra_env=to_env(setting))
+                                  reps=config.reps, extra_env=to_env(setting),
+                                  measure=config.measure)
 
     return run
 
