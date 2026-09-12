@@ -41,13 +41,17 @@ reference (it needs its own venv — torch, flashinfer, nvidia-cutlass-dsl).
 | stage | FlashInfer CuTeDSL | this port | gap |
 |---|---:|---:|---:|
 | quantize hidden (+ scale retile) | 10.9 µs | 13.0 µs | 1.19× |
-| gemm1 + silu_and_mul + quantize | 13.4 + 8.7 = 22.1 µs | 34.7 µs (one fused kernel) | 1.57× |
-| gemm2 `(l,m,n)×(l,k,n)` | 9.4 µs · 1821 TFLOP/s | 12.9 µs · 1327 | 1.37× |
-| **end to end** | **46.0 µs** | **65.3 µs** | **1.42×** |
-| dense bf16 `jnp.einsum` baseline | 62.6 µs | | |
+| gemm1 + silu_and_mul + quantize | 13.4 + 8.7 = 22.1 µs | 32.0 µs (one fused kernel) | 1.45× |
+| gemm2 `(l,m,n)×(l,k,n)` | 9.4 µs · 1821 TFLOP/s | 13.0 µs · 1322 | 1.38× |
+| **end to end** | **46.0 µs** | **62.6 µs** | **1.36×** |
+| dense bf16 `jnp.einsum` baseline | 65.4 µs | | |
 
-**The port runs at 70% of the reference**, up from 55%, and is now level with the dense
-bf16 baseline (0.96×) which it previously lost to.
+**The port runs at 73% of the reference**, up from 55%, and now beats the dense bf16
+baseline (1.05×) which it previously lost to by a wide margin.
+
+About 6 µs of the 62.6 is XLA glue rather than kernels: two scale-retile transposes
+(~4 µs) and a launch for the per-expert alpha division (~2 µs) on `(l,)`-shaped arrays.
+The reference's equivalent is ~3.6 µs.
 
 Measured in isolation the GEMMs are closer than the table suggests -- gemm1 alone is
 18.3 µs at 1880 TFLOP/s and gemm2 12.9 at 1327. An earlier version of this table read
@@ -81,6 +85,7 @@ bit-exact:
 | shape-adaptive `block_k` / `stages` | gemm1 27.2 → 18.3, gemm2 18.5 → 12.9 |
 | warp split inside one warpgroup | gemm1 1855 → 1910 TFLOP/s |
 | **fusing GEMM1 + silu_and_mul + quantize** | **end to end 83.5 → 65.3 µs** |
+| select instead of multiply-add in the scale expansion | fused 34.1 → 32.5 µs |
 
 That last row is the one worth dwelling on. Timed against each other as standalone
 kernels, the fused version beats the two it replaces by 2% -- 34.3 µs against 35.0 --
@@ -212,6 +217,24 @@ Both remain available and tested, off by default, because the reference does use
 they are presumably what wins at larger tiles than the 128x128 the MMA scale path allows
 here, and combining them (collective *and* warp-specialized, which is the reference's
 actual structure) is the one configuration not yet tried.
+
+**The one-hot scale expansion is forced, and it is expensive.** Widening a per-16-column
+scale back across the tile costs 9.5 µs of the fused kernel's 34 -- ablating it out drops
+the kernel to 24.7 µs. Every cheaper formulation (`jnp.repeat`, `broadcast_to` +
+`reshape`, per-block slice and concatenate) fails layout inference, now checked in *both*
+the WGMMA layout reading smem and the TCGEN05 layout reading TMEM. What did help was
+writing it as a `jnp.where` select rather than a multiply-add by a 0/1 mask: same result,
+1.6 µs cheaper. Its cost is proportional to the sub-tile width, and the floor there is
+the output store -- TMA wants 16 bytes per row, which at half a byte per e2m1 value is 32
+columns, and 32 produces wrong values (measured twice, in two different kernels), so 64.
+
+This is the clearest candidate for a JAX issue: a reduction over sub-row groups and the
+matching broadcast back are the natural way to express block-scaled quantization, and
+neither has a layout solution.
+
+**Values that come out of TMEM need `Layout.TCGEN05`, not `Layout.WGMMA`.** Every
+quantize kernel here starts from shared memory and uses WGMMA; the fused epilogue starts
+from `async_load_tmem`, and the WGMMA layout has no inference solution from there at all.
 
 **A 2-CTA collective MMA does not pay without warp specialization.** The reference uses
 one, so it looked like the biggest single lever. Implemented and verified bit-exact, it

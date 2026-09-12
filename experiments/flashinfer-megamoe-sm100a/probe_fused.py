@@ -50,16 +50,22 @@ us_unfused = timed(lambda: jg(a_q, asf, w1_q, wsf, alpha, masked_m, GemmConfig()
     + timed(lambda: jsq(gateup, a2gs, masked_m))
 print(f"unfused gemm1 + silu_quantize      {us_unfused:7.1f} us")
 
-for bk, st in [(256, 1), (256, 2), (128, 2), (128, 3), (128, 4), (512, 1)]:
-    cfg = FusedConfig(block_k=bk, stages=st)
-    try:
-        q, sf = jax.block_until_ready(jf(a_q, asf, w1_q, wsf, alpha, a2gs, masked_m, cfg))
-    except Exception as ex:
-        print(f"fused bk={bk} st={st}: {' '.join(str(ex).split())[:95]}")
-        continue
-    ok_q = np.array_equal(np.asarray(q, np.float32), np.asarray(wq, np.float32))
-    ok_sf = np.array_equal(np.asarray(sf, np.float32), np.asarray(wsf_ref, np.float32))
-    us = timed(lambda: jf(a_q, asf, w1_q, wsf, alpha, a2gs, masked_m, cfg))
-    smem = st * (3 * 128 * bk // 2 + 3 * (bk // 64) * 512) + 2 * 2 * 128 * 64 // 2 + 128 * 16
-    print(f"fused bk={bk:<4}st={st:<3} smem={smem:<7}{232448 // smem} blk/SM {us:7.1f} us  "
-          f"values={'exact' if ok_q else 'MISMATCH'} scales={'exact' if ok_sf else 'MISMATCH'}")
+import gemm1_silu_quantize as _g
+for sub in (64, 32):
+    _g.SUB_K = sub
+    jax.clear_caches()
+    print(f"--- SUB_K={sub}")
+    for bk, st in [(128, 3), (256, 2)]:
+        cfg = FusedConfig(block_k=bk, stages=st)
+        try:
+            q, sf = jax.block_until_ready(
+                jf(a_q, asf, w1_q, wsf, alpha, a2gs, masked_m, cfg))
+        except Exception as ex:
+            print(f"  bk={bk} st={st}: {' '.join(str(ex).split())[:90]}")
+            continue
+        ok_q = np.array_equal(np.asarray(q, np.float32), np.asarray(wq, np.float32))
+        ok_sf = np.array_equal(np.asarray(sf, np.float32), np.asarray(wsf_ref, np.float32))
+        us = timed(lambda: jf(a_q, asf, w1_q, wsf, alpha, a2gs, masked_m, cfg))
+        print(f"  bk={bk:<4}st={st:<3} {us:7.1f} us  "
+              f"values={'exact' if ok_q else 'MISMATCH'} "
+              f"scales={'exact' if ok_sf else 'MISMATCH'}")

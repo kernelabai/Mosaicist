@@ -35,7 +35,15 @@ from jax.experimental.pallas import mosaic_gpu as plgpu
 
 from masked_gemm import SF_TILE_K, SMEM_PER_SM, TMEM_ROWS, _fp4_transforms
 from nvfp4 import FP4_DTYPE, FP4_MAX, SF_DTYPE, SF_MAX, SF_VEC_SIZE
-from quantize_kernels import APPROX_MATH, LOG2E, SUB_K
+from quantize_kernels import APPROX_MATH, LOG2E
+
+SUB_K = 64
+"""Columns per output store, and per round of the one-hot expansion.
+
+The expansion costs one full-width multiply-add per 16-element block over SUB_K columns,
+so its total is proportional to SUB_K -- narrower is cheaper. The floor is the store:
+each sub-tile is TMA'd on its own and TMA wants at least 16 bytes per row, which at half
+a byte per e2m1 value means SUB_K >= 32."""
 
 TILE_N = 256  # activation columns per block; see the docstring
 HALF = TILE_N // 2  # one MMA pass
@@ -44,8 +52,8 @@ TMA_WARP, MMA_WARP = 0, 1
 
 @dataclasses.dataclass(frozen=True)
 class FusedConfig:
-    block_k: int = 128
-    stages: int = 2
+    block_k: int = 128  # measured best: 3 stages of 128 beat 2 of 256, unlike the plain
+    stages: int = 3  # GEMM, because three operand streams make each stage 1.5x as big
 
 
 def _quantize_half(vals, gs, q_smem, pass_idx, sf_full, nb_total):
@@ -61,7 +69,7 @@ def _quantize_half(vals, gs, q_smem, pass_idx, sf_full, nb_total):
     vals = plgpu.layout_cast(vals, plgpu.Layout.TCGEN05)
     for s in range(nsub):
         sub = vals[:, s * SUB_K:(s + 1) * SUB_K]
-        inv_sub = jnp.zeros((TMEM_ROWS, SUB_K), jnp.float32)
+        inv_sub = jnp.zeros((TMEM_ROWS, SUB_K), jnp.float32)  # overwritten block by block
         for j in range(nb_sub):
             block = sub[:, j * SF_VEC_SIZE:(j + 1) * SF_VEC_SIZE]
             amax = plgpu.layout_cast(jnp.max(jnp.abs(block), axis=-1),
@@ -69,8 +77,8 @@ def _quantize_half(vals, gs, q_smem, pass_idx, sf_full, nb_total):
             sf = jnp.clip(amax / FP4_MAX * gs, 0.0, SF_MAX).astype(SF_DTYPE).astype(jnp.float32)
             step = sf / gs
             inv = jnp.where(step > 0.0, 1.0, 0.0) / jnp.where(step == 0.0, 1.0, step)
-            inv_sub += inv[:, None] * (
-                jnp.arange(SUB_K) // SF_VEC_SIZE == j).astype(jnp.float32)[None, :]
+            inv_sub = jnp.where((jnp.arange(SUB_K) // SF_VEC_SIZE == j)[None, :],
+                                inv[:, None], inv_sub)  # select beats multiply-add here
             # this half owns scale columns [pass_idx * 8, +8) of the 256-wide tile
             col = pass_idx * (HALF // SF_VEC_SIZE) + s * nb_sub + j
             sf_full += sf[:, None] * (
