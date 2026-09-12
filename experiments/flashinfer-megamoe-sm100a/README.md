@@ -99,6 +99,7 @@ these GEMMs reach 1660 TFLOP/s where the Hopper analog reaches 376.
 |---|---|
 | `nvfp4.py` | NVFP4 semantics, an fp32 reference for every stage, and the MMA scale tiling |
 | `masked_gemm.py` | the block-scaled masked grouped GEMM (`tcgen05_mma` with `a_scale`/`b_scale`) |
+| `masked_gemm_ws.py` | warp-specialized + persistent variant of the same GEMM (slower; see below) |
 | `quantize_kernels.py` | the two quantize kernels |
 | `moe.py` | the end-to-end path, plus `make_moe_inputs` |
 | `test_nvfp4.py` | reference + scale-layout tests; runs anywhere |
@@ -110,6 +111,34 @@ these GEMMs reach 1660 TFLOP/s where the Hopper analog reaches 376.
 | `probe_*.py` | the diagnostics behind the findings below, incl. `probe_collective.py` |
 
 ## What the port turned up
+
+**Neither warp specialization nor a 2-CTA MMA pays at these tile sizes.** Both are in
+the reference, both were implemented and verified bit-exact here, and both are slower
+than the plain kernel. `masked_gemm_ws.py` holds the warp-specialized version: a TMA
+warp that runs ahead, an MMA warp, a separate store warpgroup, a persistent
+`dynamic_scheduling_loop` and a double-buffered TMEM accumulator.
+
+| kernel | smem | blocks/SM | TFLOP/s |
+|---|---:|---|---:|
+| plain, `block_k=512, stages=1` | 107 KB | 2 | **1878** |
+| plain, `block_k=256, stages=2` | 107 KB | 2 | 1849 |
+| warp-specialized, `block_k=256, stages=4` | 181 KB | 1 | 1710 |
+| warp-specialized, `block_k=512, stages=2` | 181 KB | 1 | 1665 |
+| warp-specialized, `block_k=256, stages=2` | 107 KB | 2 | 1502 |
+| warp-specialized, no persistence | 107 KB | 2 | 1055 |
+
+The middle rows are the interesting part. Warp specialization *inverts* the occupancy
+rule found above: it prefers the deeper pipeline at 181 KB and one block per SM, because
+a TMA warp running ahead inside one block substitutes for the overlap the plain kernel
+gets from a second resident block. At these tile sizes the second block is worth more
+than the specialized pipeline, and the two cannot be had at once. Persistence is not
+optional for the split — without it the store warpgroup has no next tile to overlap with
+and the same code drops to 1055 TFLOP/s.
+
+Both remain available and tested, off by default, because the reference does use them:
+they are presumably what wins at larger tiles than the 128x128 the MMA scale path allows
+here, and combining them (collective *and* warp-specialized, which is the reference's
+actual structure) is the one configuration not yet tried.
 
 **A 2-CTA collective MMA does not pay without warp specialization.** The reference uses
 one, so it looked like the biggest single lever. Implemented and verified bit-exact, it
@@ -187,11 +216,19 @@ than trusting the reshape.
 
 ## Known limitations, in the order worth fixing
 
-1. **No warp specialization or persistent scheduler.** JAX's own
-   `blackwell_matmul_mgpu.py` is a working template for both. This moved to the top
-   after the collective experiment below: it is the prerequisite, not an alternative.
-2. **2-CTA collective MMA is implemented but off** (`GemmConfig(collective=True)`),
-   because it measured slower — see below.
+The order below was revised after measuring: three structural GEMM optimizations were
+implemented and all three were slower, so the remaining value is in the quantize path,
+not the GEMM.
+
+1. **`silu_and_mul + quantize` is a separate launch** — 17.0 µs against the reference's
+   8.7, the largest single stage gap. It writes 16.8 MB of bf16 and reads it straight
+   back; with all arithmetic ablated it still costs 11.9 µs, so that round trip is most
+   of it. It belongs in GEMM1's epilogue. The obstacle is that silu needs `gate[j]` and
+   `up[j]`, which sit `n` apart, so a GEMM1 block would have to compute two accumulators
+   (columns `j` and `j + n`) instead of one.
+2. **Warp specialization and 2-CTA collective are implemented but off**
+   (`masked_gemm_ws.py`, `GemmConfig(collective=True)`), both measured slower — see
+   above. Combining them is the untried configuration.
 3. **`silu_and_mul + quantize` is a separate launch** that writes 16.8 MB of bf16 and
    reads it straight back. With all arithmetic ablated away it still costs 11.9 µs, so
    that traffic is most of the 1.95× gap on the worst stage; it belongs in GEMM1's
