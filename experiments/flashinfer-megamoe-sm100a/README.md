@@ -106,12 +106,6 @@ the two kernels back to back. It was most of the gap between this benchmark's
 
 Optimization took it from 120.4 µs to 83.5 µs (1.44×), every step verified bit-exact:
 
-| change | effect |
-|---|---|
-| `exp2` instead of `jax.nn.sigmoid` | 42.1 → 27.1 µs on the fused kernel |
-| `approx_math=True` | 26.5 → 16.9 µs on the same kernel |
-| `SUB_K=64` sub-tiles for the one-hot expansion | 14.2 → 10.3 µs on plain quantize |
-| shape-adaptive `block_k` / `stages` | gemm1 27.2 → 20.7, gemm2 18.5 → 15.1 |
 
 ## Why Blackwell changes the shape of the kernel
 
