@@ -46,7 +46,11 @@ CONSTRUCTS: tuple[Construct, ...] = (
               ("L0.cluster", "L1.tma"), knobs=("cluster",)),
     Construct("pipeline", "cutlass.pipeline.PipelineTmaAsync(stages=...)",
               "plgpu.emit_pipeline(max_concurrent_steps=, delay_release=) or a Barrier ring",
-              ("L2.pipeline_barriers", "L2.stages"), knobs=("stages", "delay_release")),
+              ("L2.pipeline_barriers", "L2.stages", "L1.tma"),
+              # block_k is the K extent of one stage: it sets both the pipeline depth
+              # that fits in shared memory and the work per MMA, and on both
+              # architectures measured here it has mattered more than the depth itself
+              knobs=("stages", "block_k", "delay_release")),
     Construct("hopper mma", "warpgroup.MmaF16BF16Op + cute.gemm",
               "plgpu.wgmma(acc, a, b); plgpu.wgmma_wait(n); plgpu.ACC",
               ("L1.mma", "L2.wgmma_wait_depths"), knobs=("wgmma_wait",)),

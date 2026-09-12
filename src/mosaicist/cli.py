@@ -151,7 +151,8 @@ def _cmd_converge(args) -> int:
         candidate_entry=args.entry,
         knobs_module=args.knobs,
         outdir=args.out,
-        config=LoopConfig(max_steps=args.steps, reps=args.reps, python=args.python),
+        config=LoopConfig(max_steps=args.steps, reps=args.reps, python=args.python,
+                          gate_numerics=not args.no_gate),
     )
     print(result.summary())
     return 0 if result.converged else 1
@@ -220,6 +221,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--steps", type=int, default=12)
     p.add_argument("--reps", type=int, default=30)
     p.add_argument("--python", help="interpreter for capture subprocesses")
+    p.add_argument("--no-gate", action="store_true",
+                   help="skip the numerics gate: use when the reference and candidate "
+                        "cannot be fed identical inputs (different frameworks), and "
+                        "check numerics separately")
     p.set_defaults(func=_cmd_converge)
 
     args = ap.parse_args(argv)

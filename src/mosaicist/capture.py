@@ -150,6 +150,30 @@ def time_and_record(fn, args, reps: int, warmup: int) -> tuple[list[float], dict
     return per_rep, resources, launch, out
 
 
+def _to_numpy(a):
+    """A host float array from a JAX array, a torch tensor, or anything array-like.
+
+    Torch tensors have to come off the device explicitly, and narrow float types
+    (e2m1, e4m3) have no numpy equivalent, so those are saved as raw bytes -- enough
+    for a bitwise comparison, which is what the gate does with them.
+    """
+    import numpy as np
+
+    if hasattr(a, "detach"):  # torch: off the device, and into a dtype numpy has
+        a = a.detach().cpu()
+        if hasattr(a, "dtype") and str(a.dtype) in ("torch.bfloat16", "torch.float16",
+                                                    "torch.float8_e4m3fn",
+                                                    "torch.float8_e5m2"):
+            a = a.float()
+        return a.numpy().astype(np.float32)
+    try:
+        return np.asarray(a, dtype=np.float32)
+    except (TypeError, ValueError):
+        # narrow float types numpy cannot hold: keep the bits, which is all the gate
+        # needs for a bitwise comparison
+        return np.asarray(a).view(np.uint8).astype(np.float32)
+
+
 def _block(x):
     """Wait for a result from either framework without importing both."""
     try:
@@ -206,10 +230,7 @@ def capture(entry: str, compiler: str, outdir: str | Path, *, name: str | None =
 
         arrays = result if isinstance(result, (tuple, list)) else [result]
         for i, a in enumerate(arrays):
-            try:
-                np.save(out / f"out{i}.npy", np.asarray(a, dtype=np.float32))
-            except Exception:  # noqa: BLE001 - narrow dtypes numpy cannot hold
-                np.save(out / f"out{i}.npy", np.asarray(a).view(np.uint8))
+            np.save(out / f"out{i}.npy", _to_numpy(a))
 
         # the float64 oracle, if the module offers one: the numerics gate needs a third
         # opinion, and computing it here keeps it beside the outputs it judges
@@ -219,7 +240,7 @@ def capture(entry: str, compiler: str, outdir: str | Path, *, name: str | None =
             try:
                 ref_out = oracle_fn(*args)
                 for i, a in enumerate(ref_out if isinstance(ref_out, (tuple, list)) else [ref_out]):
-                    np.save(out / f"oracle{i}.npy", np.asarray(a, dtype=np.float64))
+                    np.save(out / f"oracle{i}.npy", _to_numpy(a).astype(np.float64))
             except Exception:  # noqa: BLE001 - an oracle is optional
                 pass
 

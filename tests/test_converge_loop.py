@@ -142,3 +142,24 @@ def test_loop_stops_when_the_knob_space_runs_out(tmp_path):
                    config=LoopConfig(max_steps=99, gate_numerics=False), runner=runner)
     assert len(res.steps) == 3, "one step per distinct setting, then the space is spent"
     assert not res.converged
+
+
+def test_loop_survives_settings_that_cannot_be_built(tmp_path):
+    """A knob space always contains invalid combinations; one must not end the run."""
+    ref = _bundle(tmp_path, "ref", [1.0] * 5)
+    seen = []
+
+    def runner(setting, outdir):
+        seen.append(setting["stages"])
+        if setting["stages"] == 2:
+            raise ValueError("needs 300000 bytes of smem")
+        return _bundle(tmp_path, Path(outdir).name, [50.0] * 5)
+
+    res = converge(ref, "unused:build", tmp_path / "run4",
+                   space=KnobSpace({"stages": [1, 2, 4]}),
+                   config=LoopConfig(max_steps=9, gate_numerics=False), runner=runner)
+    assert 2 in seen and len(seen) == 3, "the bad setting is tried once, then passed over"
+    failed = [s for s in res.steps if s.time == float("inf")]
+    assert len(failed) == 1 and "smem" in failed[0].reason
+    assert res.best is not None and res.best.time == 50.0
+    assert "----" in res.summary()

@@ -63,6 +63,10 @@ class Result:
         lines = [f"reference {self.reference_time:.1f} us, noise floor {self.noise:.1%}", ""]
         for s in self.steps:
             mark = "accept" if s.accepted else "  --  "
+            if s.time == float("inf"):
+                lines.append(f"  {s.index:>2}  ----   {s.reason}  "
+                             f"{json.dumps(s.setting, sort_keys=True)}")
+                continue
             lines.append(f"  {s.index:>2} {mark}  {s.time:8.1f} us  D={s.distance:.3f}  "
                          f"{'numerics ok' if s.numerics_pass else 'NUMERICS FAIL'}  "
                          f"{json.dumps(s.setting, sort_keys=True)}")
@@ -143,6 +147,7 @@ def converge(reference: Bundle, candidate_entry: str, outdir: str | Path,
     noise = cfg.default_noise
 
     beam, tuner = Beam(), Tuner(space)
+    by_id: dict[str, Setting] = {}
     setting: Setting | None = space.default()
     steps: list[Step] = []
     last_fixes: list = []
@@ -151,7 +156,20 @@ def converge(reference: Bundle, candidate_entry: str, outdir: str | Path,
         if setting is None:
             break
         tuner.mark(setting)
-        bundle = run(setting, out / f"step{i:02d}")
+        try:
+            bundle = run(setting, out / f"step{i:02d}")
+        except Exception as exc:  # noqa: BLE001
+            # a knob space always contains combinations that cannot be built -- too much
+            # shared memory, an illegal tile. That is a result about the space, not a
+            # reason to abandon the search.
+            steps.append(Step(index=i, setting=dict(setting), time=float("inf"),
+                              distance=float("nan"), numerics_pass=False, accepted=False,
+                              reason=f"capture failed: {' '.join(str(exc).split())[:120]}"))
+            setting = tuner.propose(
+                by_id.get(beam.best.id, setting) if beam.best else setting, last_fixes)
+            if setting is None:
+                break
+            continue
         fp = bundle.fingerprint()
         report = diff_fingerprints(ref_fp, fp)
         fixes = diagnose(report)
@@ -160,7 +178,8 @@ def converge(reference: Bundle, candidate_entry: str, outdir: str | Path,
         t = times.median if times else float("inf")
         ok = _numerics_ok(reference, bundle, out_fmt) if cfg.gate_numerics else True
 
-        cand = Candidate(id=key(setting), time=t, distance=report.distance,
+        by_id[key(space.clamp(setting))] = dict(setting)
+        cand = Candidate(id=key(space.clamp(setting)), time=t, distance=report.distance,
                          numerics_pass=ok, fix=str(fixes[0]) if fixes else None)
         decision: Decision = beam.offer(cand, noise)
         nxt = tuner.propose(setting, fixes)
@@ -171,8 +190,12 @@ def converge(reference: Bundle, candidate_entry: str, outdir: str | Path,
 
         if beam.converged(t_ref, noise):
             break
-        # explore from the best candidate so far, not from the last one tried
-        setting = nxt if nxt is not None else None
+        # explore from the best candidate so far, not from the last one tried: a greedy
+        # search that walks away from its best result stops being greedy
+        base = by_id.get(beam.best.id, setting) if beam.best else setting
+        setting = tuner.propose(base, fixes)
+        if setting is None:
+            setting = nxt
         if setting is None:
             break
 
