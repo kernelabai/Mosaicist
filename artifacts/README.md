@@ -32,6 +32,9 @@ nvidia-cutlass-dsl 4.7.1.
 | `runs/ex69/cute/` | The CuTeDSL port's SASS at each stage of its optimization — `v3`, `v4`, `v5`, `own`, `own16`. This is the record of how that port reached parity. |
 | `runs/ex69/port/` | The port's final PTX and ptxas log. |
 | `env/` | Package freezes for `venv-jax` and `venv-cute`, plus GPU and toolchain versions. |
+| `shim/` | A patched `cutlass/subbyte_reference.h` and the diff against upstream. CUTLASS guards `__nv_atomic_load_n` behind `CUDACC >= 12.8`, but the intrinsic is not actually there in 12.8; raising the guard to 12.9 in four places is what let example 69's int4 variants build. Upstream commit in `upstream/cutlass-commit.txt`. |
+| `upstream/` | The exact FlashInfer/SGLang sources the Blackwell port was written against — `flashinfer_cutedsl_moe.py` and `blockscaled_gemm.py`. Pinned here because upstream moves. |
+| `probe/` | A CuTeDSL grouped-GEMM probe used while porting example 69, and its output. |
 
 Large `.sass` and `.ptx` files are gzipped; the tools read them after `gunzip`.
 

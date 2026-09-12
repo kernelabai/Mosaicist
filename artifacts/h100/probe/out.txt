@@ -1,0 +1,24 @@
+Running Hopper Persistent Dense GEMM with:
+mnkl: (2048, 1024, 8192, 1)
+A dtype: Float16, B dtype: Float16, C dtype: Float16, Acc dtype: Float32
+Matrix majors - A: k, B: k, C: m
+Tile Shape: (128, 16), Cluster Shape: (1, 1)
+Swizzle size: 1, Raster order: along_n
+Tolerance: 0.1
+Warmup iterations: 5
+Iterations: 20
+Skip reference checking: False
+Use cold L2: False
+RESULT tile (128, 16) time_us 243.77920627593994 TFLOPs 140.94614094816328
+Running Hopper Persistent Dense GEMM with:
+mnkl: (2048, 1024, 8192, 1)
+A dtype: Float16, B dtype: Float16, C dtype: Float16, Acc dtype: Float32
+Matrix majors - A: k, B: k, C: m
+Tile Shape: (128, 128), Cluster Shape: (1, 1)
+Swizzle size: 1, Raster order: along_n
+Tolerance: 0.1
+Warmup iterations: 5
+Iterations: 20
+Skip reference checking: False
+Use cold L2: False
+RESULT tile (128, 128) time_us 113.49600553512573 TFLOPs 302.73962687934466
