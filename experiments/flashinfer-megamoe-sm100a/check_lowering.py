@@ -84,4 +84,16 @@ else:
     attempt("silu_mul_quantize_nvfp4_pallas", silu_mul_quantize_nvfp4_pallas,
             sd((l, m, 2 * n), jnp.bfloat16), sd((l,), jnp.float32), sd((l,), jnp.int32))
 
+    from moe import moe_masked
+
+    l, m, k, n = 2, 256, 512, 256
+    attempt("moe_masked (end to end)",
+            lambda *a: moe_masked(*a),
+            sd((l, m, k), jnp.bfloat16),
+            sd((l, 2 * n, k), FP4_DTYPE), sd((l, 2 * n // 128, k // 64, 32, 16), SF_DTYPE),
+            sd((l,), jnp.float32), sd((l,), jnp.float32),
+            sd((l, k, n), FP4_DTYPE), sd((l, k // 128, n // 64, 32, 16), SF_DTYPE),
+            sd((l,), jnp.float32), sd((l,), jnp.float32),
+            sd((l,), jnp.int32), sd((l,), jnp.float32), sd((l,), jnp.float32))
+
 sys.exit(0 if ok else 1)

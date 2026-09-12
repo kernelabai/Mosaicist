@@ -99,16 +99,71 @@ def v_rowmax_nocast(vals, gs, tk, nb):
     return q.astype(FP4_DTYPE), sf[:, None]
 
 
+def v_reshape_cast_result(vals, gs, tk, nb):
+    """Annotate the reduced result rather than the input tile."""
+    blocked = vals.reshape(M, nb, SF_VEC_SIZE)
+    amax = plgpu.layout_cast(jnp.max(jnp.abs(blocked), -1), plgpu.Layout.WGMMA)
+    sf = jnp.clip(amax / FP4_MAX * gs, 0.0, SF_MAX).astype(SF_DTYPE)
+    return _finish(blocked, sf, gs).reshape(M, tk).astype(FP4_DTYPE), sf
+
+
+def v_reshape_strided(vals, gs, tk, nb):
+    """WG_STRIDED is the layout for plain elementwise work, which is all this is."""
+    vals = plgpu.layout_cast(vals, plgpu.Layout.WG_STRIDED((M, tk), vec_size=8))
+    blocked = vals.reshape(M, nb, SF_VEC_SIZE)
+    sf = jnp.clip(jnp.max(jnp.abs(blocked), -1) / FP4_MAX * gs, 0.0, SF_MAX).astype(SF_DTYPE)
+    return _finish(blocked, sf, gs).reshape(M, tk).astype(FP4_DTYPE), sf
+
+
+def _assemble(vals, gs, tk, nb, amax_of):
+    """Build the full-width divisor and the scale row without slicing either output.
+
+    Neither a column-slice store into swizzled smem nor a concatenate of the per-block
+    results survives lowering, so each block's contribution is added into a full-width
+    array through a constant one-hot mask instead.
+    """
+    inv_full = jnp.zeros((M, tk), jnp.float32)
+    sf_full = jnp.zeros((M, nb), jnp.float32)
+    for b in range(nb):
+        col = (jnp.arange(tk) // SF_VEC_SIZE == b).astype(jnp.float32)  # (tk,)
+        slot = (jnp.arange(nb) == b).astype(jnp.float32)  # (nb,)
+        amax = plgpu.layout_cast(amax_of(b, col), plgpu.Layout.WGMMA.reduce(1))
+        sf = jnp.clip(amax / FP4_MAX * gs, 0.0, SF_MAX).astype(SF_DTYPE).astype(jnp.float32)
+        step = sf / gs
+        inv = jnp.where(step > 0.0, 1.0, 0.0) / jnp.where(step == 0.0, 1.0, step)
+        inv_full += inv[:, None] * col[None, :]
+        sf_full += sf[:, None] * slot[None, :]
+    q = jnp.clip(vals * inv_full, -FP4_MAX, FP4_MAX).astype(FP4_DTYPE)
+    return q, sf_full.astype(SF_DTYPE)
+
+
+def v_masked_reduce(vals, gs, tk, nb):
+    """No slicing anywhere: a block's max is a full-row max of the masked tile."""
+    vals = plgpu.layout_cast(vals, plgpu.Layout.WGMMA)
+    absv = jnp.abs(vals)
+    return _assemble(vals, gs, tk, nb, lambda b, col: jnp.max(absv * col[None, :], axis=-1))
+
+
+def v_slice_reduce(vals, gs, tk, nb):
+    """Reduce a 2D column slice -- cheaper, if slicing a register tile survives."""
+    vals = plgpu.layout_cast(vals, plgpu.Layout.WGMMA)
+    return _assemble(vals, gs, tk, nb, lambda b, col: jnp.max(
+        jnp.abs(vals[:, b * SF_VEC_SIZE:(b + 1) * SF_VEC_SIZE]), axis=-1))
+
+
 def v_no_scale_at_all(vals, gs, tk, nb):
     """Control: does an fp4 tile store plus a small e4m3 store lower at all?"""
     return vals.astype(FP4_DTYPE), jnp.zeros((M, nb), SF_DTYPE)
 
 
+# tk=256 gives 16 scale columns; a narrower scale tile is rejected by TMA, which needs
+# at least 128 bits along the last dimension.
 ok = True
-ok &= run("control: fp4 tile store, no reduction  (tk=128)", 128, v_no_scale_at_all)
-ok &= run("reshape (M,nb,16) reduce, layout_cast  (tk=128)", 128, v_reshape_cast)
-ok &= run("reshape (M,nb,16) reduce, no cast      (tk=128)", 128, v_reshape_nocast)
-ok &= run("row max, layout_cast                   (tk=16) ", 16, v_rowmax_cast, sf_cols=1)
-ok &= run("row max, no cast                       (tk=16) ", 16, v_rowmax_nocast, sf_cols=1)
-ok &= run("row max, no cast                       (tk=64) ", 64, v_rowmax_nocast, sf_cols=1)
+ok &= run("control: fp4 tile store, no reduction  (tk=256)", 256, v_no_scale_at_all)
+ok &= run("reshape (M,nb,16) reduce, layout_cast  (tk=256)", 256, v_reshape_cast)
+ok &= run("reshape (M,nb,16) reduce, no cast      (tk=256)", 256, v_reshape_nocast)
+ok &= run("reshape reduce, cast result to WGMMA   (tk=256)", 256, v_reshape_cast_result)
+ok &= run("reshape reduce, WG_STRIDED on tile     (tk=256)", 256, v_reshape_strided)
+ok &= run("masked full-row reduce per block       (tk=256)", 256, v_masked_reduce)
+ok &= run("sliced row reduce per block            (tk=256)", 256, v_slice_reduce)
 sys.exit(0 if ok else 1)

@@ -6,13 +6,19 @@
 UNVERIFIED on hardware; see `masked_gemm.py`. Both lower for sm_100a
 (`check_lowering.py`) and both follow the arithmetic in `nvfp4.quantize_nvfp4`.
 
-Two shapes here are deliberate, and both come from what actually broke on Hopper in
-the sm_90a experiment:
+Four shapes here are forced rather than chosen. Each was found by `probe_lower.py`,
+which bisects formulations by whether they survive Mosaic's lowering:
 
-  * the per-16-element block maxima are computed as a static Python loop over column
-    slices, not by reshaping the tile to (rows, blocks, 16) and reducing the last axis.
-    Mosaic GPU's layout inference has no solution for a reduction over a reshaped
-    sub-row axis; a plain row reduction of a slice is the one form known to work.
+  * `TILE_K` is 256, not 128, because the scale tile is stored with TMA and TMA needs
+    at least 128 bits along the last dimension. 256 elements of K give 16 e4m3 scales
+    per row, which is exactly 128 bits; 128 elements give 8 and are rejected.
+  * the per-16-element block maxima come from a static Python loop over 2D column
+    slices. Reshaping the tile to (rows, blocks, 16) and reducing the last axis has no
+    layout solution, with or without annotations, under WGMMA or WG_STRIDED.
+  * the per-block results are accumulated into full-width arrays through constant
+    one-hot masks, rather than concatenated or written to column slices of smem.
+    A concatenate has no layout; a strided store into a swizzled ref is rejected
+    outright ("We cannot apply swizzle to non-contiguous refs").
   * the "scale flushed to zero" guard is a multiply by a 0/1 mask rather than a
     `jnp.where` whose condition broadcasts from the reduced layout to the full tile --
     that select has no layout either. `x * 1.0` is exact and `x * 0.0` is zero, so the
@@ -39,27 +45,35 @@ from jax.experimental.pallas import mosaic_gpu as plgpu
 from nvfp4 import FP4_DTYPE, FP4_MAX, SF_DTYPE, SF_MAX, SF_VEC_SIZE
 
 TILE_M = 128
-TILE_K = 128  # elements of K per tile; TILE_K // SF_VEC_SIZE block scales per row
+TILE_K = 256  # elements of K per tile; gives TILE_K // SF_VEC_SIZE = 16 scales,
+              # the narrowest scale row TMA will store (128 bits)
 
 
 def _quantize_tile(vals: jax.Array, gs: jax.Array) -> tuple[jax.Array, jax.Array]:
     """(TILE_M, TILE_K) fp32 -> (e2m1 values, e4m3 block scales (TILE_M, TILE_K // 16)).
 
-    The block maxima come from splitting the minor axis into (blocks, 16) and reducing
-    the last one. The alternatives both fail: writing each block into a column slice of
-    smem hits "We cannot apply swizzle to non-contiguous refs", and slicing the tile per
-    block and concatenating the results back has no layout solution.
+    Follows `nvfp4.quantize_nvfp4` exactly; only the shape of the computation differs,
+    for the lowering reasons in the module docstring.
     """
     nb = TILE_K // SF_VEC_SIZE
     vals = plgpu.layout_cast(vals, plgpu.Layout.WGMMA)
-    blocked = vals.reshape(TILE_M, nb, SF_VEC_SIZE)
-    amax = jnp.max(jnp.abs(blocked), axis=-1)  # (TILE_M, nb)
-    sf = jnp.clip(amax / FP4_MAX * gs, 0.0, SF_MAX).astype(SF_DTYPE)
-    step = sf.astype(jnp.float32) / gs
-    safe = jnp.where(step == 0.0, 1.0, step)  # avoid dividing by a flushed scale
-    keep = jnp.where(step > 0.0, 1.0, 0.0)  # ... then zero those rows
-    q = jnp.clip(blocked / safe[..., None] * keep[..., None], -FP4_MAX, FP4_MAX)
-    return q.reshape(TILE_M, TILE_K).astype(FP4_DTYPE), sf
+    inv_full = jnp.zeros((TILE_M, TILE_K), jnp.float32)  # 1 / step, per column
+    sf_full = jnp.zeros((TILE_M, nb), jnp.float32)
+    for b in range(nb):
+        cols = (jnp.arange(TILE_K) // SF_VEC_SIZE == b).astype(jnp.float32)  # (TILE_K,)
+        slot = (jnp.arange(nb) == b).astype(jnp.float32)  # (nb,)
+        block = vals[:, b * SF_VEC_SIZE:(b + 1) * SF_VEC_SIZE]
+        amax = plgpu.layout_cast(jnp.max(jnp.abs(block), axis=-1),
+                                 plgpu.Layout.WGMMA.reduce(1))  # (TILE_M,)
+        # round-tripping through e4m3 here is what the format stores, and casting the
+        # accumulated result back at the end is exact because that cast is idempotent
+        sf = jnp.clip(amax / FP4_MAX * gs, 0.0, SF_MAX).astype(SF_DTYPE).astype(jnp.float32)
+        step = sf / gs
+        inv = jnp.where(step > 0.0, 1.0, 0.0) / jnp.where(step == 0.0, 1.0, step)
+        inv_full += inv[:, None] * cols[None, :]
+        sf_full += sf[:, None] * slot[None, :]
+    q = jnp.clip(vals * inv_full, -FP4_MAX, FP4_MAX).astype(FP4_DTYPE)
+    return q, sf_full.astype(SF_DTYPE)
 
 
 def quantize_nvfp4_pallas(x: jax.Array, global_scale: jax.Array, masked_m: jax.Array):
