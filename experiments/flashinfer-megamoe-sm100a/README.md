@@ -323,9 +323,32 @@ than trusting the reshape.
 
 ## Why parity is not reachable from here
 
-Tuning is exhausted: the last several changes all landed inside the measurement noise,
-and the convergence loop's own report now lists only structural items. The decisive one
-cannot be expressed.
+Tuning is exhausted, and so is copying the reference. Three things were taken directly
+from its PTX and captured launch record, and none of them closed the gap:
+
+**Its epilogue is a loop, so ours is now too.** The reference drains its accumulator a
+chunk at a time -- one `tcgen05.ld` per iteration, a TMA store, then `bulk.wait:4.read`
+-- where this port read the whole tile and stored once. Copying that dropped registers
+from 176 per thread to 112 and left the runtime unchanged (17.85 -> 17.76 us, inside the
+noise). Worth keeping for the register headroom, but not a speedup.
+
+**That headroom did not rescue two warpgroups.** At 255 registers a 256-thread block
+could not run two-per-SM; chunked, it uses ~98 and it can. It is still 33% slower than
+one warpgroup (23.6 vs 17.7 us). So register pressure was never the reason the
+two-warpgroup version lost. The epilogue is roughly one ninth of a tile's time, so
+overlapping it cannot pay for two idle warps in the compute warpgroup plus a
+synchronisation per tile.
+
+**Its tile shape was reconstructed and run.** The capture says the reference uses 226304
+bytes of shared memory; solving for what fills that gives two candidates, `tile_n=128,
+block_k=256, stages=5` and `tile_n=256, block_k=128, stages=6`. Both were built. They
+run at 19.2 us against this port's 17.8 -- adopting the reference's own shape makes this
+kernel *slower*, because a 226 KB block runs alone on its SM and only the 192-thread
+warp specialisation makes that pay.
+
+That is the whole argument in one line: the reference's configuration is not
+transferable without its thread layout, and its thread layout is the thing Pallas cannot
+express. The decisive difference cannot be expressed.
 
 The reference launches **192 threads** — six warps: four for the epilogue, one issuing
 TMAs, one issuing MMAs. Pallas cannot launch that. Its `num_threads` counts *warpgroups*,

@@ -42,6 +42,15 @@ from nvfp4 import FP4_DTYPE, SF_DTYPE, SF_VEC_SIZE
 TMA_WARP, MMA_WARP = 0, 1
 COMPUTE_WG, STORE_WG = 0, 1
 
+EPILOGUE_N = 64
+"""Columns drained from TMEM per epilogue chunk.
+
+The reference's PTX drains its accumulator in a loop -- one tcgen05.ld per iteration,
+then a TMA store, waiting only `bulk.wait:4.read` -- rather than reading the whole tile
+and storing once, which is what this port did. Chunking keeps fewer accumulator values
+live and lets a chunk's store overlap the next chunk's read. 64 bf16 columns is 128
+bytes per row, comfortably above TMA's 16-byte minimum."""
+
 
 def masked_grouped_gemm_ws(
     a_q: jax.Array,  # (l, m, k) e2m1
@@ -66,6 +75,7 @@ def masked_grouped_gemm_ws(
     n_tiles = tn // TMEM_ROWS
     ab_transforms = _fp4_transforms(bk)
 
+    nchunk = tn // EPILOGUE_N
     smem = stages * (tm * bk // 2 + tn * bk // 2 + 2 * sf_tiles * 512) + tm * tn * 2
     if smem > SMEM_PER_SM:
         raise ValueError(f"{smem} bytes of smem exceeds {SMEM_PER_SM}")
@@ -170,11 +180,22 @@ def masked_grouped_gemm_ws(
 
                 @pl.when(active)
                 def _():
-                    vals = plgpu.async_load_tmem(acc)
+                    al = alpha_gmem[e]
+                    # chunked, as the reference's store loop is: this is what makes two
+                    # warpgroups affordable. Draining the whole tile at once costs 255
+                    # registers per thread, and two 256-thread blocks then do not fit on
+                    # an SM; chunked it is ~112, and they do.
+                    for c in range(nchunk):
+                        cols = pl.ds(c * EPILOGUE_N, EPILOGUE_N)
+                        out_smem[c] = (plgpu.async_load_tmem(acc.at[:, cols])
+                                       * al).astype(jnp.bfloat16)
+                        plgpu.commit_smem()
+                        plgpu.copy_smem_to_gmem(
+                            out_smem.at[c],
+                            out_gmem.at[e, m_slice,
+                                        pl.ds(ni * tn + c * EPILOGUE_N, EPILOGUE_N)])
+                        plgpu.wait_smem_to_gmem(1, wait_read_only=True)
                     plgpu.wait_load_tmem()
-                    out_smem[...] = (vals * alpha_gmem[e]).astype(jnp.bfloat16)
-                    plgpu.commit_smem()
-                    plgpu.copy_smem_to_gmem(out_smem, out_gmem.at[e, m_slice, n_slice])
                     plgpu.wait_smem_to_gmem(0)
 
                 plgpu.barrier_arrive(store_done.at[acc_slot])
@@ -191,7 +212,7 @@ def masked_grouped_gemm_ws(
             plgpu.SMEM((stages, tn, bk), FP4_DTYPE, transforms=ab_transforms),
             plgpu.SMEM((stages, 1, sf_tiles, 32, 16), SF_DTYPE),
             plgpu.SMEM((stages, n_tiles, sf_tiles, 32, 16), SF_DTYPE),
-            plgpu.SMEM((tm, tn), jnp.bfloat16),
+            plgpu.SMEM((nchunk, tm, EPILOGUE_N), jnp.bfloat16),
             plgpu.TMEM((tm, tn * 2), jnp.float32),  # double buffered across tiles
             plgpu.TMEM((TMEM_ROWS, k_scales), SF_DTYPE,
                        layout=plgpu.TMEMLayout.SCALES_LAYOUT),
@@ -364,6 +385,7 @@ def masked_grouped_gemm_w1p(
     num_kb = k // bk
     sf_tiles, k_scales = bk // SF_TILE_K, bk // SF_VEC_SIZE
     n_tiles = tn // TMEM_ROWS
+    nchunk = tn // EPILOGUE_N
     ab_transforms = _fp4_transforms(bk)
 
     def body(a_gmem, asf_gmem, b_gmem, bsf_gmem, alpha_gmem, mask_gmem, out_gmem,
@@ -425,11 +447,20 @@ def masked_grouped_gemm_w1p(
                         plgpu.tcgen05_commit_arrive(mma_done)
 
                 plgpu.barrier_wait(mma_done)
-                acc = plgpu.async_load_tmem(acc_tmem)
+                al = alpha_gmem[e]
+                # drained in chunks, following the reference's store loop: each chunk's
+                # TMA overlaps the next chunk's read from TMEM
+                for c in range(nchunk):
+                    cols = pl.ds(c * EPILOGUE_N, EPILOGUE_N)
+                    out_smem[c] = (plgpu.async_load_tmem(acc_tmem.at[:, cols])
+                                   * al).astype(jnp.bfloat16)
+                    plgpu.commit_smem()
+                    plgpu.copy_smem_to_gmem(
+                        out_smem.at[c],
+                        out_gmem.at[e, m_slice, pl.ds(ni * tn + c * EPILOGUE_N,
+                                                      EPILOGUE_N)])
+                    plgpu.wait_smem_to_gmem(1, wait_read_only=True)
                 plgpu.wait_load_tmem()
-                out_smem[...] = (acc * alpha_gmem[e]).astype(jnp.bfloat16)
-                plgpu.commit_smem()
-                plgpu.copy_smem_to_gmem(out_smem, out_gmem.at[e, m_slice, n_slice])
                 plgpu.wait_smem_to_gmem(0)
 
     return plgpu.kernel(
@@ -441,7 +472,7 @@ def masked_grouped_gemm_w1p(
             plgpu.SMEM((stages, tn, bk), FP4_DTYPE, transforms=ab_transforms),
             plgpu.SMEM((stages, 1, sf_tiles, 32, 16), SF_DTYPE),
             plgpu.SMEM((stages, n_tiles, sf_tiles, 32, 16), SF_DTYPE),
-            plgpu.SMEM((tm, tn), jnp.bfloat16),
+            plgpu.SMEM((nchunk, tm, EPILOGUE_N), jnp.bfloat16),
             plgpu.TMEM((tm, tn), jnp.float32),
             plgpu.TMEM((TMEM_ROWS, k_scales), SF_DTYPE,
                        layout=plgpu.TMEMLayout.SCALES_LAYOUT),
