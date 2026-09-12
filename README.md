@@ -13,9 +13,11 @@ Converge a Pallas Mosaic GPU kernel on a CuTeDSL reference kernel. The reference
 | Timing statistics, noise floor, acceptance rule, beam | §8–9 | done, tested |
 | Bundle schema | §4 | done |
 | CUPTI launch records + device timing (`bench/cupti_trace.py`), `mosaicist time` | §4, §9 | done; used on an H100 |
-| Capture harnesses for one kernel pair (`experiments/hopper_gemm/`) | §4 | prototype; generalizing them into workers is next |
+| Capture workers (`capture.py`, `mosaicist capture`) | §4 | done; validated on a CuTeDSL reference and a Pallas candidate on a B200 |
+| Contract extraction, construct catalog, v0 translator | §5 | done for the GEMM family (wgmma and tcgen05); LLM backend is a seam |
+| Knob tuner and the convergence loop (`mosaicist converge`) | §8 | done; run end to end against FlashInfer's CuTeDSL GEMM |
+| Structural rewriter and the beam | §8 | variant backend done; LLM backend is a seam with the model call injected |
 | `ncu` profiling | §9 | not started; needs profiling permissions on the host |
-| Naive translator, knob tuner, LLM rewriter, loop driver | §5, §8 | not started |
 
 `tests/fixtures/*.ptx` are hand-abbreviated examples. `tests/fixtures/real/` holds real compiler output captured on an H100.
 
@@ -36,6 +38,41 @@ The noise floor from three A/A runs of the reference is 5.8%, so every row count
 - Persistent tile loops hid warp specialization and were mislabeled as producer loops.
 
 Reproduce with `experiments/hopper_gemm/{gen_inputs,ref_cutedsl,cand_pallas}.py`. Each script's docstring has its invocation. Use one pinned `ptxas` (≥ 12.9, for PTX ISA 8.8) for both kernels.
+
+## The loop, run end to end
+
+`experiments/loop/` converges the Pallas NVFP4 grouped GEMM onto FlashInfer's CuTeDSL
+kernel on a B200. Capture both, then let the loop turn one knob at a time:
+
+```bash
+mosaicist capture ref_flashinfer_gemm --compiler cutedsl --out bundles/ref --arch sm_100a
+mosaicist converge bundles/ref cand_pallas_gemm --out bundles/run --steps 12 --no-gate
+```
+
+```
+reference 13.4 us, noise floor 5.0%
+   0 accept      27.6 us  D=0.431  {"block_k": 128, "stages": 1, ...}
+   2 accept      18.4 us  D=0.316  {"block_k": 512, "stages": 1, ...}
+   4  ----   capture failed: needs more smem than an SM has   {"block_k": 512, "stages": 3}
+   7   --        18.4 us  D=0.316  {"block_k": 512, "stages": 1, "warp_split": true}
+
+best 18.4 us (1.38x reference), D=0.316
+structural steps taken:
+  - structural: collective -> True, named by collective
+  - structural: warp_split -> True
+remaining differences with no knob to turn:
+  - P1 rewrite: 1 warpgroup per CTA; reference runs 2
+  - P2 investigate: TMA box rank differs
+  - P5 rewrite: stmatrix use differs
+```
+
+In twelve steps it reaches the configuration a long manual search had arrived at, then
+reports what is left as named gaps. Knobs are tried before structural changes, and a
+setting that cannot be built is recorded and stepped over rather than ending the run.
+
+Capturing the reference also showed something its PTX alone did not: it launches
+`grid=[1,1,148]`, one block per SM with 226 KB of shared memory. It is persistent, and
+the port is not.
 
 ## Ports
 

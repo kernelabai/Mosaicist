@@ -27,6 +27,11 @@ KNOBS = {
     "warp_split": [False, True],
     "collective": [False, True],
 }
+#: knobs that swap in a different kernel rather than retune this one. The tuner leaves
+#: these alone; the rewriter reaches for them once the parameter knobs are spent, which
+#: is the design's knobs-before-rewrites ordering made concrete.
+STRUCTURAL = ("warp_split", "collective")
+
 DEFAULTS = {"block_k": 128, "stages": 1, "warp_split": False, "collective": False}
 
 

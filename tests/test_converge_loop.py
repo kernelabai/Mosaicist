@@ -163,3 +163,69 @@ def test_loop_survives_settings_that_cannot_be_built(tmp_path):
     assert len(failed) == 1 and "smem" in failed[0].reason
     assert res.best is not None and res.best.time == 50.0
     assert "----" in res.summary()
+
+
+def test_variant_rewriter_prefers_the_knob_the_rewrite_fix_names():
+    from mosaicist.converge.rewrite import VariantRewriter, structural_knobs
+
+    sp = KnobSpace({"stages": [1, 2], "num_threads": [1, 2], "persistent": [False, True]})
+    rw = VariantRewriter(space=sp, structural=("persistent", "num_threads"))
+    warp = Fix(phase="P1", tag="rewrite", title="1 warpgroup per CTA; reference runs 2",
+               detail="", keys=["L0.warpgroups"], weight=1.0)
+    assert "num_threads" in structural_knobs([warp])
+
+    p = rw.propose({"stages": 1, "num_threads": 1, "persistent": False}, [warp], set())
+    assert p is not None and p.setting["num_threads"] == 2
+    assert "num_threads" in p.rationale
+
+
+def test_variant_rewriter_only_touches_declared_structural_knobs():
+    from mosaicist.converge.rewrite import VariantRewriter
+
+    sp = KnobSpace({"stages": [1, 2], "persistent": [False, True]})
+    rw = VariantRewriter(space=sp, structural=("persistent",))
+    p = rw.propose({"stages": 1, "persistent": False}, [], set())
+    assert p is not None and p.setting == {"stages": 1, "persistent": True}
+
+    spent = {key({"stages": 1, "persistent": True})}
+    assert rw.propose({"stages": 1, "persistent": False}, [], spent) is None
+
+
+def test_llm_rewriter_carries_the_source_it_produced():
+    from mosaicist.converge.rewrite import LLMRewriter
+
+    calls = []
+
+    def emit(source, fix, rows):
+        calls.append((fix.title, tuple(rows)))
+        return source + "\n# warp specialized\n"
+
+    rw = LLMRewriter(emit=emit, source="def kernel(): ...")
+    warp = Fix(phase="P1", tag="rewrite", title="warpgroups differ", detail="",
+               keys=["L0.warpgroups"], weight=1.0)
+    knob_only = Fix(phase="P2", tag="knob", title="depth", detail="",
+                    keys=["L2.pipeline_barriers"], weight=1.0)
+
+    assert rw.propose({}, [knob_only], set()) is None, "knob fixes are not its business"
+    p = rw.propose({}, [warp, knob_only], set())
+    assert p is not None and "warp specialized" in p.source
+    assert calls == [("warpgroups differ", ("L0.warpgroups",))]
+
+
+def test_loop_asks_for_a_structural_step_once_the_knobs_are_spent(tmp_path):
+    """The knobs run out at 50 us; only the structural variant reaches 20."""
+    from mosaicist.converge.rewrite import VariantRewriter
+
+    ref = _bundle(tmp_path, "ref", [10.0] * 5)
+    sp = KnobSpace({"stages": [1, 2], "warp_split": [False, True]})
+
+    def runner(setting, outdir):
+        t = 20.0 if setting["warp_split"] else 50.0
+        return _bundle(tmp_path, Path(outdir).name, [t] * 5)
+
+    res = converge(ref, "unused:build", tmp_path / "run5", space=sp,
+                   rewriter=VariantRewriter(space=sp, structural=("warp_split",)),
+                   config=LoopConfig(max_steps=8, gate_numerics=False), runner=runner)
+    assert res.best is not None and res.best.time == 20.0
+    assert res.rewrites and "warp_split" in res.rewrites[0]
+    assert "structural steps taken" in res.summary()

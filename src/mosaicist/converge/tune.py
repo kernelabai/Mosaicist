@@ -37,6 +37,10 @@ def knobs_for_fixes(fixes: Iterable) -> list[str]:
 class Tuner:
     space: KnobSpace
     tried: set[str] = field(default_factory=set)
+    #: knobs that swap in a different kernel rather than retune this one. The design
+    #: orders the phases knobs-before-rewrites, so the tuner leaves these to the
+    #: rewriter instead of reaching them incidentally.
+    structural: tuple[str, ...] = ()
 
     def mark(self, setting: Setting) -> None:
         self.tried.add(key(self.space.clamp(setting)))
@@ -44,12 +48,13 @@ class Tuner:
     def propose(self, current: Setting, fixes: Iterable = ()) -> Setting | None:
         """The next setting to try, or None when the space is exhausted."""
         current = self.space.clamp(current)
-        named = knobs_for_fixes(fixes)
+        tunable = [k for k in self.space.knobs if k not in self.structural]
+        named = [k for k in knobs_for_fixes(fixes) if k in tunable]
 
-        for candidate in self.space.neighbours(current, only=named or None):
-            if key(candidate) not in self.tried:
-                return candidate
-        for candidate in self.space.neighbours(current):
-            if key(candidate) not in self.tried:
-                return candidate
+        # never fall back to `only=None`: that means "no restriction" and would let
+        # structural knobs back in through the fallback, which is the rewriter's job
+        for only in ([named, tunable] if named else [tunable]):
+            for candidate in self.space.neighbours(current, only=only):
+                if key(self.space.clamp(candidate)) not in self.tried:
+                    return candidate
         return None

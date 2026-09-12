@@ -24,6 +24,7 @@ from ..diagnose import diagnose
 from ..ptx.diff import diff as diff_fingerprints
 from .accept import Beam, Candidate, Decision
 from .knobs import KnobSpace, Setting, key, to_env
+from .rewrite import Rewriter
 from .tune import Tuner
 
 
@@ -58,6 +59,8 @@ class Result:
     noise: float
     converged: bool
     remaining: list[str] = field(default_factory=list)
+    #: structural proposals the loop took, in order
+    rewrites: list[str] = field(default_factory=list)
 
     def summary(self) -> str:
         lines = [f"reference {self.reference_time:.1f} us, noise floor {self.noise:.1%}", ""]
@@ -76,6 +79,8 @@ class Result:
             ratio = self.best.time / self.reference_time if self.reference_time else float("nan")
             lines += ["", f"best {self.best.time:.1f} us ({ratio:.2f}x reference), "
                           f"D={self.best.distance:.3f}, setting {self.best.id}"]
+        if self.rewrites:
+            lines += ["", "structural steps taken:"] + [f"  - {r}" for r in self.rewrites]
         lines.append("converged" if self.converged
                      else "did not reach the reference within its noise floor")
         if self.remaining:
@@ -88,7 +93,8 @@ class Result:
         p.write_text(json.dumps({"steps": [asdict(s) for s in self.steps],
                                  "best": asdict(self.best) if self.best else None,
                                  "reference_time": self.reference_time, "noise": self.noise,
-                                 "converged": self.converged, "remaining": self.remaining},
+                                 "converged": self.converged, "remaining": self.remaining,
+                                 "rewrites": self.rewrites},
                                 indent=2))
         return p
 
@@ -128,7 +134,7 @@ def _numerics_ok(ref: Bundle, cand: Bundle, fmt: str) -> bool:
 def converge(reference: Bundle, candidate_entry: str, outdir: str | Path,
              knobs_module: str | None = None, config: LoopConfig | None = None,
              runner: Runner | None = None, space: KnobSpace | None = None,
-             out_fmt: str = "bf16") -> Result:
+             out_fmt: str = "bf16", rewriter: Rewriter | None = None) -> Result:
     """Turn one knob at a time until the candidate matches the reference's runtime."""
     import importlib
 
@@ -136,9 +142,19 @@ def converge(reference: Bundle, candidate_entry: str, outdir: str | Path,
     out = Path(outdir)
     out.mkdir(parents=True, exist_ok=True)
 
-    if space is None:
+    module = None
+    if space is None or rewriter is None:
         mod_name = knobs_module or candidate_entry.partition(":")[0]
-        space = KnobSpace.from_module(importlib.import_module(mod_name))
+        try:
+            module = importlib.import_module(mod_name)
+        except ImportError:
+            module = None
+    if space is None:
+        space = KnobSpace.from_module(module) if module else KnobSpace()
+    if rewriter is None and module is not None:
+        from .rewrite import VariantRewriter
+
+        rewriter = VariantRewriter.from_module(module, space)
     run = runner or subprocess_runner(candidate_entry, cfg)
 
     ref_fp = reference.fingerprint()
@@ -146,8 +162,12 @@ def converge(reference: Bundle, candidate_entry: str, outdir: str | Path,
     t_ref = ref_times.median if ref_times else float("nan")
     noise = cfg.default_noise
 
-    beam, tuner = Beam(), Tuner(space)
+    structural = tuple(getattr(module, "STRUCTURAL", ()) or ()) if module else ()
+    if rewriter is not None and hasattr(rewriter, "structural"):
+        structural = tuple(rewriter.structural)
+    beam, tuner = Beam(), Tuner(space, structural=structural)
     by_id: dict[str, Setting] = {}
+    rewrites: list[str] = []
     setting: Setting | None = space.default()
     steps: list[Step] = []
     last_fixes: list = []
@@ -165,8 +185,12 @@ def converge(reference: Bundle, candidate_entry: str, outdir: str | Path,
             steps.append(Step(index=i, setting=dict(setting), time=float("inf"),
                               distance=float("nan"), numerics_pass=False, accepted=False,
                               reason=f"capture failed: {' '.join(str(exc).split())[:120]}"))
-            setting = tuner.propose(
-                by_id.get(beam.best.id, setting) if beam.best else setting, last_fixes)
+            base = by_id.get(beam.best.id, setting) if beam.best else setting
+            setting = tuner.propose(base, last_fixes)
+            if setting is None and rewriter is not None:
+                proposal = rewriter.propose(base, last_fixes, tuner.tried)
+                if proposal is not None:
+                    setting, _ = proposal.setting, rewrites.append(proposal.rationale)
             if setting is None:
                 break
             continue
@@ -182,7 +206,6 @@ def converge(reference: Bundle, candidate_entry: str, outdir: str | Path,
         cand = Candidate(id=key(space.clamp(setting)), time=t, distance=report.distance,
                          numerics_pass=ok, fix=str(fixes[0]) if fixes else None)
         decision: Decision = beam.offer(cand, noise)
-        nxt = tuner.propose(setting, fixes)
         steps.append(Step(index=i, setting=dict(setting), time=t, distance=report.distance,
                           numerics_pass=ok, accepted=decision.accepted, reason=decision.reason,
                           fix=str(fixes[0]) if fixes else None,
@@ -194,14 +217,20 @@ def converge(reference: Bundle, candidate_entry: str, outdir: str | Path,
         # search that walks away from its best result stops being greedy
         base = by_id.get(beam.best.id, setting) if beam.best else setting
         setting = tuner.propose(base, fixes)
-        if setting is None:
-            setting = nxt
+        if setting is None and rewriter is not None:
+            # knobs around the best are spent: ask for the structural step Diagnose has
+            # been asking for. The beam keeps it even if it lands briefly slower.
+            proposal = rewriter.propose(base, fixes, tuner.tried)
+            if proposal is not None:
+                setting = proposal.setting
+                rewrites.append(proposal.rationale)
         if setting is None:
             break
 
     remaining = [f"{f.phase} {f.tag}: {f.title}" for f in last_fixes
                  if f.tag in ("rewrite", "gap", "investigate")]
     result = Result(steps=steps, best=beam.best, reference_time=t_ref, noise=noise,
-                    converged=beam.converged(t_ref, noise), remaining=remaining)
+                    converged=beam.converged(t_ref, noise), remaining=remaining,
+                    rewrites=rewrites)
     result.save(out / "converge.json")
     return result
