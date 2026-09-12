@@ -16,7 +16,7 @@ The emitted module exposes `build()`, so `mosaicist capture` can run it with no 
 from __future__ import annotations
 
 import textwrap
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 
@@ -240,6 +240,47 @@ def emit_v0(contract: Contract, path: str | Path,
     return p
 
 
+@dataclass
+class TranslationResult:
+    path: Path
+    rounds: int
+    report: object | None = None
+    hints: list[str] = field(default_factory=list)
+
+    @property
+    def passed(self) -> bool:
+        return self.report is None or getattr(self.report, "passed", False)
+
+
+def translate_until_correct(contract: Contract, path: str | Path, capture_fn,
+                            gate_fn, translator: Translator | None = None,
+                            max_rounds: int = 3) -> TranslationResult:
+    """Emit v0, run it, gate it, and re-emit with hints until it passes (DESIGN §5).
+
+    `capture_fn(module_path) -> Bundle` runs the emitted module; `gate_fn(bundle) ->
+    NumericsReport` judges it. Both are injected because running a kernel needs a GPU
+    and a framework, and this module should stay importable without either.
+
+    The hints are the structured error map the design describes: the translator is told
+    what shape the failure had, not merely that there was one.
+    """
+    tr = translator or TemplateTranslator()
+    hints: list[str] = []
+    report = None
+    for r in range(1, max_rounds + 1):
+        p = emit_v0(contract, path, tr, hints)
+        bundle = capture_fn(p)
+        report = gate_fn(bundle)
+        if getattr(report, "passed", False):
+            return TranslationResult(path=p, rounds=r, report=report, hints=hints)
+        new_hints = repair_hints(report)
+        if not new_hints or new_hints == hints:
+            # the same diagnosis twice means another round would emit the same source
+            return TranslationResult(path=p, rounds=r, report=report, hints=new_hints)
+        hints = new_hints
+    return TranslationResult(path=Path(path), rounds=max_rounds, report=report, hints=hints)
+
+
 def repair_hints(report) -> list[str]:
     """Turn a numerics failure into hints the translator can act on (DESIGN §5, step 2).
 
@@ -249,7 +290,9 @@ def repair_hints(report) -> list[str]:
     hints: list[str] = []
     if getattr(report, "passed", True):
         return hints
-    frac = getattr(report, "worse_fraction", 0.0) or 0.0
+    frac = getattr(report, "worse_fraction", None)
+    if frac is None:  # fall back to how much of the output is not bit-identical
+        frac = 1.0 - (getattr(report, "bitwise_equal_fraction", 0.0) or 0.0)
     if 0 < frac < 0.15:
         hints.append("failure is confined to a few tiles: check boundary masking")
     else:

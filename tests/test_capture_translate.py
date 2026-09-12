@@ -161,3 +161,73 @@ def test_repair_hints_separate_boundary_failures_from_arithmetic():
 
     ok = NumericsReport(True, "bf16", 100, [], 1.0, {}, 0, 0, [])
     assert repair_hints(ok) == []
+
+
+def test_repair_loop_retries_with_hints_then_stops(tmp_path):
+    """v0 fails, the hints change the emission, the second round passes."""
+    from mosaicist.translate import translate_until_correct
+
+    c = Contract(name="g", arch="sm_90a",
+                 operands=[Operand("a", (128, 128), "bfloat16")],
+                 out_shape=(128, 128), dims={"m": 128, "n": 128, "k": 128},
+                 tile={"m": 128, "n": 128}, mma="wgmma")
+
+    seen_hints = []
+
+    class Recording(TemplateTranslator):
+        def emit(self, contract, hints=None):
+            seen_hints.append(list(hints or []))
+            return super().emit(contract, hints)
+
+    reports = [NumericsReport(False, "bf16", 4, [], 0.1, {}, 9, 0, ["q1 exceeded"]),
+               NumericsReport(True, "bf16", 4, [], 1.0, {}, 0, 0, [])]
+
+    res = translate_until_correct(c, tmp_path / "v0.py", capture_fn=lambda p: None,
+                                  gate_fn=lambda b: reports.pop(0),
+                                  translator=Recording(), max_rounds=3)
+    assert res.passed and res.rounds == 2
+    assert seen_hints[0] == [] and seen_hints[1], "round two must be told what failed"
+    assert "accumulator" in " ".join(seen_hints[1])
+
+
+def test_repair_loop_gives_up_when_the_diagnosis_repeats(tmp_path):
+    from mosaicist.translate import translate_until_correct
+
+    c = Contract(name="g", arch="sm_90a", operands=[Operand("a", (8, 8), "bfloat16")],
+                 out_shape=(8, 8), dims={"m": 128, "n": 128, "k": 128},
+                 tile={"m": 128, "n": 128}, mma="wgmma")
+    same = NumericsReport(False, "bf16", 4, [], 0.1, {}, 9, 0, ["q1 exceeded"])
+
+    calls = []
+    res = translate_until_correct(c, tmp_path / "v0.py",
+                                  capture_fn=lambda p: calls.append(p),
+                                  gate_fn=lambda b: same, max_rounds=5)
+    assert not res.passed
+    assert len(calls) == 2, "one round to fail, one to confirm the diagnosis repeats"
+
+
+def test_spec_round_trips_and_report_names_the_gaps(tmp_path):
+    from mosaicist.converge.accept import Candidate
+    from mosaicist.converge.loop import Result, Step
+    from mosaicist.pipeline import Spec, report
+
+    (tmp_path / "spec.json").write_text(json.dumps({
+        "dims": {"m": 512, "n": 512, "k": 1024},
+        "operands": [{"name": "a", "shape": [512, 1024], "dtype": "bfloat16",
+                      "axes": ["m", "k"]}],
+        "out_shape": [512, 512], "out_dtype": "bfloat16"}))
+    spec = Spec.load(tmp_path / "spec.json")
+    assert spec.dims["k"] == 1024 and spec.operands[0].dtype == "bfloat16"
+    assert spec.out_shape == (512, 512)
+
+    c = Contract(name="ref:build", arch="sm_100a", dims=spec.dims, tile={"m": 128},
+                 mma="tcgen05", mma_kind="mxf4nvf4", deferred=["persistent scheduling"])
+    res = Result(steps=[Step(0, {"stages": 1}, 20.0, 0.2, True, True, "first")],
+                 best=Candidate("s", 20.0, 0.2, True), reference_time=10.0, noise=0.05,
+                 converged=False, remaining=["P1 rewrite: 1 warpgroup per CTA"])
+    b = Bundle(kind="reference", name="ref", source="ref:build")
+
+    text = report(res, c, b)
+    assert "2.00x reference" in text
+    assert "persistent scheduling" in text, "the report must say what v0 skipped"
+    assert "## Gaps" in text and "1 warpgroup per CTA" in text

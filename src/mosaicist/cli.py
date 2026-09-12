@@ -158,6 +158,23 @@ def _cmd_converge(args) -> int:
     return 0 if result.converged else 1
 
 
+def _cmd_port(args) -> int:
+    import sys as _sys
+
+    from .converge.loop import LoopConfig
+    from .pipeline import Spec, port
+
+    work = Path(args.out)
+    _sys.path.insert(0, str(work.resolve()))  # so a generated v0 is importable
+    result = port(args.ref_entry, args.ref_compiler, Spec.load(args.spec), work,
+                  config=LoopConfig(max_steps=args.steps, reps=args.reps,
+                                    python=args.python, gate_numerics=not args.no_gate),
+                  ref_python=args.ref_python, candidate_entry=args.candidate)
+    print(result.summary())
+    print(f"\nreport: {work / 'report.md'}")
+    return 0 if result.converged else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="mosaicist", description=__doc__.split("\n\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -226,6 +243,19 @@ def main(argv: list[str] | None = None) -> int:
                         "cannot be fed identical inputs (different frameworks), and "
                         "check numerics separately")
     p.set_defaults(func=_cmd_converge)
+
+    p = sub.add_parser("port", help="capture a reference, translate a v0, and converge it")
+    p.add_argument("ref_entry", help="reference module:function exposing build()")
+    p.add_argument("--ref-compiler", choices=("cutedsl", "pallas"), default="cutedsl")
+    p.add_argument("--spec", required=True, help="JSON: dims, operands, out_shape")
+    p.add_argument("--out", required=True, help="working directory")
+    p.add_argument("--candidate", help="hand-written candidate module, instead of a v0")
+    p.add_argument("--steps", type=int, default=12)
+    p.add_argument("--reps", type=int, default=30)
+    p.add_argument("--python", help="interpreter for candidate captures")
+    p.add_argument("--ref-python", help="interpreter for the reference capture")
+    p.add_argument("--no-gate", action="store_true")
+    p.set_defaults(func=_cmd_port)
 
     args = ap.parse_args(argv)
     return args.func(args)
