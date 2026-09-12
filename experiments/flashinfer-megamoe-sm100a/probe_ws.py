@@ -10,7 +10,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "src"))
 from mosaicist.bench.cupti_trace import KernelTrace  # noqa: E402
 
 from masked_gemm import GemmConfig, masked_grouped_gemm  # noqa: E402
-from masked_gemm_ws import masked_grouped_gemm_ws  # noqa: E402
+from masked_gemm_ws import masked_grouped_gemm_w1, masked_grouped_gemm_ws  # noqa: E402
 from nvfp4 import masked_grouped_gemm_reference, quantize_nvfp4, to_mma_scale_layout  # noqa: E402
 
 L, M, K, N = 8, 512, 2048, 2048
@@ -46,6 +46,9 @@ def run(label, fn, cfg):
 
 
 run("baseline (auto)", masked_grouped_gemm, GemmConfig())
-run("warp-specialized (auto)", masked_grouped_gemm_ws, GemmConfig())
-for bk, st in [(256, 2), (256, 4), (128, 4), (128, 8), (512, 2)]:
-    run(f"WS bk={bk} st={st}", masked_grouped_gemm_ws, GemmConfig(block_k=bk, stages=st))
+run("baseline bk=256 st=2", masked_grouped_gemm, GemmConfig(block_k=256, stages=2))
+run("1-WG warp-split (auto)", masked_grouped_gemm_w1, GemmConfig())
+for bk, st in [(256, 2), (256, 4), (128, 4), (128, 6)]:
+    run(f"1-WG warp-split bk={bk} st={st}", masked_grouped_gemm_w1,
+        GemmConfig(block_k=bk, stages=st))
+run("2-WG WS bk=256 st=4", masked_grouped_gemm_ws, GemmConfig(block_k=256, stages=4))

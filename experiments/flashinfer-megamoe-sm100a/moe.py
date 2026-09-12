@@ -25,7 +25,8 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 
-from masked_gemm import GemmConfig, masked_grouped_gemm
+from masked_gemm import GemmConfig
+from masked_gemm_ws import masked_grouped_gemm_w1 as masked_grouped_gemm
 from nvfp4 import to_mma_scale_layout
 from quantize_kernels import quantize_nvfp4_pallas, silu_mul_quantize_nvfp4_pallas
 

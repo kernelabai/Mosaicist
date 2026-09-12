@@ -54,14 +54,18 @@ the CuTeDSL kernel is the real bar.
 The gap is structural, and the three causes are visible in
 `flashinfer/gemm/kernels/grouped_gemm_masked_blackwell.py`:
 
-* **2-CTA collective MMA** — `mma_tiler_mn 256,128` with `cluster_shape_mn 2,1` and
-  `use_2cta_instrs`. Twice the M tile, and B is fetched once per cluster rather than
-  once per CTA.
-* **A persistent scheduler** — `num_persistent_clusters` and a tile scheduler, so CTAs
-  launch once and walk tiles, amortizing the prologue and keeping weights in L2.
-* **Warp specialization** — dedicated `tma_warp_id`, `mma_warp_id` and a separate
-  epilogue warp group. This port has one warpgroup doing TMA issue, MMA and epilogue in
+* **Warp specialization at 192 threads** — four epilogue warps plus one TMA warp and one
+  MMA warp. This port originally had one warpgroup doing TMA issue, MMA and epilogue in
   sequence.
+* **A deep pipeline** — 14 mbarrier inits, so roughly seven stages, against this port's
+  one or two.
+* **A real mainloop.** The reference's K loop is a loop; this port's is fully unrolled.
+
+An earlier version of this README claimed the reference used a 2-CTA collective MMA,
+read off `mma_tiler_mn 256,128 --cluster_shape_mn 2,1` in its source. That is an example
+in a docstring, not what runs. The PTX says `cta_group::1` and `cluster [1,1,1]`: at this
+shape the reference is **not** collective, which is consistent with the collective
+experiment below losing.
 
 Optimization so far took the port from 120.4 µs to 83.5 µs (1.44×), every step verified
 bit-exact:
@@ -110,9 +114,64 @@ these GEMMs reach 1660 TFLOP/s where the Hopper analog reaches 376.
 | `bench_flashinfer.py` | the same measurement for FlashInfer's CuTeDSL kernel (separate venv) |
 | `probe_*.py` | the diagnostics behind the findings below, incl. `probe_collective.py` |
 
+## Comparing PTX with the reference
+
+This is what the repo's tooling is for, and it is the only reason the warp-split win
+below was found. Dump both kernels (`CUTE_DSL_KEEP_PTX=1` for the reference,
+`MOSAIC_GPU_DUMP_PTX=1` for this port) and run `mosaicist diff`:
+
+```
+fingerprint distance D = 0.349    L0 0.43  L1 0.31  L2 0.29  L3 0.67  L4 0.00
+
+  L0.warpgroups         reference 2 (192 threads), candidate 1 (128)
+  L1.tma_dims           reference ['3d','4d'], candidate ['5d']
+  L1.stmatrix           reference does not use it, candidate does
+  L1.mma_per_stage      reference 3.2, candidate 6.4
+  L2.pipeline_barriers  mbarrier.init: reference 14, candidate 3
+  L3.order              mainloop similarity 0.33
+```
+
+Three things came out of this that reading the reference's source had not:
+
+* **192 threads, not 256.** Six warps: four for the epilogue, one for TMA, one for MMA.
+  Two Pallas warpgroups cost 256 and buy two idle warps. Specializing *inside* one
+  warpgroup instead is the only structural change so far that has been faster — see
+  `masked_grouped_gemm_w1`.
+* **The reference is not collective at this shape** (`cta_group::1`), correcting what
+  this README previously said.
+* **A `bar.sync` before every one of our TMA loads** — 24 CTA barriers against the
+  reference's 8. That looked like the smoking gun, and it is not:
+  `unsafe_no_auto_barriers=True` removes the hazard tracking and changes nothing
+  measurable (17.2 vs 17.4 us). Worth recording precisely because it was the most
+  obvious-looking lead.
+
+One caveat about the metric itself: after adopting the warp split, runtime improved
+(18.5 -> 18.0 us) while D got slightly *worse* (0.349 -> 0.361). The sub-scores tied to
+the actual change moved the right way -- `mma_per_stage` 6.4 -> 4 against the reference's
+3.2, `pipeline_barriers` 3 -> 5 against 14 -- but the L3 op-order term rose, because
+splitting the warps reorders the loop body without making it less like the reference in
+any way that matters. D is a search heuristic here, not a scoreboard.
+
 ## What the port turned up
 
-**Neither warp specialization nor a 2-CTA MMA pays at these tile sizes.** Both are in
+**Warp specialization pays only if it does not cost a warpgroup.** The reference's 192
+threads were the clue. Splitting warps *within* one 128-thread warpgroup -- warp 0 issues
+TMAs and runs ahead, warp 1 issues the MMAs, then all four warps do the epilogue -- is
+faster than the plain kernel, while two full warpgroups are slower than both:
+
+| kernel | threads | smem | blocks/SM | TFLOP/s |
+|---|---:|---:|---|---:|
+| 1-warpgroup warp split, `block_k=256, stages=2` | 128 | 107 KB | 2 | **1910** |
+| plain, `block_k=512, stages=1` | 128 | 107 KB | 2 | 1855 |
+| plain, `block_k=256, stages=2` | 128 | 107 KB | 2 | 1784 |
+| 2-warpgroup, persistent, `block_k=256, stages=4` | 256 | 181 KB | 1 | 1717 |
+| 2-warpgroup, persistent, `block_k=256, stages=2` | 256 | 107 KB | 2 | 1502 |
+
+The warp split also flips which pipeline depth wins: the plain kernel prefers one stage
+(nothing to overlap a load with), while the split prefers two, because warp 0 needs a
+buffer to run ahead *into*. `_resolve_w1` encodes that.
+
+**Two full warpgroups and a 2-CTA MMA do not pay at these tile sizes.** Both are in
 the reference, both were implemented and verified bit-exact here, and both are slower
 than the plain kernel. `masked_gemm_ws.py` holds the warp-specialized version: a TMA
 warp that runs ahead, an MMA warp, a separate store warpgroup, a persistent

@@ -18,7 +18,8 @@ import jax.numpy as jnp
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "src"))
 from mosaicist.bench.cupti_trace import KernelTrace  # noqa: E402
 
-from masked_gemm import GemmConfig, masked_grouped_gemm  # noqa: E402
+from masked_gemm import GemmConfig  # noqa: E402
+from masked_gemm_ws import masked_grouped_gemm_w1 as masked_grouped_gemm  # noqa: E402
 from moe import make_moe_inputs, moe_masked  # noqa: E402
 from nvfp4 import to_mma_scale_layout  # noqa: E402
 from quantize_kernels import quantize_nvfp4_pallas, silu_mul_quantize_nvfp4_pallas  # noqa: E402
