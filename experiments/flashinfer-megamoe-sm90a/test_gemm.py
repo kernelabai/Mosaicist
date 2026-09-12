@@ -50,7 +50,10 @@ def main():
     for label, kwargs in [
         ("exact 3x256x256x512", dict(exact=True)),
         ("exact 2x128x256x1024", dict(exact=True, l=2, m=128, n=256, k=1024)),
-        ("exact 5x384x128x256 (tile_n=128)", dict(exact=True, l=5, m=384, n=128, k=256)),
+        ("exact 5x384x128x256", dict(exact=True, l=5, m=384, n=128, k=256)),
+        # k=384 is 3 K blocks: exercises the unpaired tail block of the mainloop
+        ("exact 3x256x256x384 (odd K blocks)", dict(exact=True, k=384)),
+        ("exact 2x128x192x128 (1 K block)", dict(exact=True, l=2, m=128, n=192, k=128)),
         ("random floats 3x256x256x512", dict(exact=False)),
         ("random floats, stages=2", dict(exact=False, config=GemmConfig(stages=2))),
     ]:
