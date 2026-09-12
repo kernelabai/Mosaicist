@@ -1,0 +1,147 @@
+Title: Mosaic GPU layout inference cannot express block-wise reduce + broadcast
+       (blocks NVFP4/MXFP4 quantization; forces an O(K^2/V) workaround)
+
+Component: Pallas / Mosaic GPU (jax.experimental.pallas.mosaic_gpu)
+Version:   jax 0.11.1, jaxlib 0.11.1
+Hardware:  attached repro verified on NVIDIA B200 (sm_100a, CUDA 12.8, driver
+           570.148.08). The same class of failure -- specifically the jnp.where with a
+           broadcast condition, item (c) below -- was also hit on an NVIDIA H100 PCIe
+           (sm_90a) with jax 0.11.1 while writing an fp8 block-scaled kernel, so this is
+           not sm_100a-specific, though the attached script was only run on the B200.
+Repro:     layout_inference_repro.py (attached below, self-contained, no deps)
+
+
+SUMMARY
+-------
+Block-scaled numeric formats -- NVFP4, MXFP4, fp8 with per-block scales -- all require
+the same two operations on a register tile:
+
+    1. reduce over contiguous groups of V columns    -> one scale per group
+    2. broadcast those scales back over their groups -> rescale the tile
+
+Neither has a layout solution in Mosaic GPU. Every natural spelling of the pair fails,
+in both the WGMMA layout (values read from SMEM) and the TCGEN05 layout (values read
+from TMEM via async_load_tmem). The only formulation that lowers reduces each group as a
+separate 2-D slice and reassembles the result by accumulating through constant one-hot
+masks -- one full-tile operation per group, so O(K/V * K) work to express what is
+logically a broadcast.
+
+This is not a micro-optimization. In a Blackwell NVFP4 grouped-GEMM epilogue the
+expansion measures 9.5 us of a 34 us kernel; ablating it out drops the kernel to 24.7 us.
+
+
+WHAT FAILS
+----------
+Verified output of the attached repro on a B200:
+
+    jax 0.11.1 on NVIDIA B200 (sm_10.0)
+
+    natural spellings:
+      FAIL  reshape to (M, K//VEC, VEC), reduce axis -1
+              Layout inference failed to find a solution. Consider adding layout
+              annotations to your program to guide the search.
+      FAIL  ... with layout_cast on the reduced result
+              Layout inference failed to find a solution. ...
+      FAIL  per-slice reduce + jnp.repeat
+              Failed to infer a possible set of layouts. This should only happen if
+              user-provided layout casts are unsatisfiable.
+      FAIL  per-slice reduce + broadcast_to + reshape
+              Failed to infer a possible set of layouts. ...
+      OK    per-slice reduce + scale + jnp.concatenate
+      OK    ... same, but the e2m1 output the format needs
+      FAIL  reshape-reduce, e2m1 output
+              Layout inference failed to find a solution. ...
+      FAIL  jnp.where with a broadcast condition
+              Layout inference failed to find a solution. ...
+
+    workaround:
+      OK    per-slice reduce + one-hot mask accumulation
+
+    values + scale vector together (what a quantizer actually emits):
+      FAIL  values by concatenate, scales by concatenate
+              Layout inference failed to find a solution. ...
+      OK    values by concatenate, scales by one-hot
+      OK    both by one-hot (what the port does today)
+
+Reading the failures:
+
+(a) The natural spelling -- reshape (M, K) to (M, K//V, V), reduce the last axis --
+    has no solution, with or without a layout_cast on the input, with a cast on the
+    reduced result instead, or under Layout.WG_STRIDED. This is the form a user reaches
+    for first.
+
+(b) Given a per-group scale computed from 2-D slices (which does lower), widening it
+    back with jnp.repeat or with broadcast_to + reshape both fail, and fail with the
+    "user-provided layout casts are unsatisfiable" message even though the only cast is
+    Layout.WGMMA.reduce(1) on the reduction result, which is the documented way to
+    annotate exactly that value.
+
+(c) jnp.where whose *condition* broadcasts from the reduced layout to the full tile has
+    no solution, while the same select with a broadcast *value* is fine. So
+        jnp.where(scale[:, None] > 0, x / scale[:, None], 0.0)
+    must be rewritten as arithmetic on a 0/1 mask.
+
+(d) jnp.concatenate of full-width blocks lowers, but jnp.concatenate of the reduced
+    (M,)-shaped per-group scales into an (M, K//V) array does not -- so a quantizer,
+    which must emit both the values and the scale vector, cannot use concatenation for
+    both. Mixing the two (values concatenated, scales accumulated through one-hot masks)
+    does lower, and is the cheapest working combination we found.
+
+
+THE WORKAROUND, AND ITS COST
+----------------------------
+    wide = jnp.zeros((M, K), jnp.float32)
+    for b in range(K // VEC):
+        amax = plgpu.layout_cast(
+            jnp.max(jnp.abs(vals[:, b*VEC:(b+1)*VEC]), axis=-1),
+            plgpu.Layout.WGMMA.reduce(1))
+        mask = (jnp.arange(K) // VEC == b).astype(jnp.float32)
+        wide += amax[:, None] * mask[None, :]      # full-tile op, once per group
+
+Writing the accumulation as jnp.where(mask, value, wide) instead of a multiply-add is
+measurably cheaper (1.6 us on the kernel above) but the asymptotics are the same.
+
+
+WHY IT MATTERS
+--------------
+Every block-scaled format has V=16 or V=32 baked into the hardware: NVFP4 (e2m1 data,
+e4m3 scales, V=16) and MXFP4 (e8m0 scales, V=32) are consumed directly by
+tcgen05.mma.kind.block_scale on sm_100a, which Pallas already exposes via
+plgpu.tcgen05_mma(a_scale=..., b_scale=...). Producing those operands is a required
+half of the feature, and it currently cannot be written in the form the arithmetic
+suggests.
+
+
+EXPECTED
+--------
+Any one of these would remove the workaround:
+
+  1. A layout rule for reducing the minor axis of a reshaped register tile
+     (M, K) -> (M, K//V, V) when V divides the tile's minor-dimension tiling, plus the
+     matching broadcast back. This is the general fix.
+  2. Failing that, a layout rule for jnp.repeat / broadcast_to along the minor axis from
+     a Layout.WGMMA.reduce(1) value to the tile it was reduced from -- the shape of the
+     data is already known to be compatible, since it came from that tile.
+  3. A dedicated primitive, e.g. plgpu.block_reduce(x, axis=-1, block=V) returning a
+     value whose layout is the tile's, broadcast over each block.
+
+Also worth fixing independently: jnp.stack is unimplemented in this lowering
+("Unimplemented primitive in Pallas Mosaic GPU lowering: stack for lowering semantics
+LoweringSemantics.Warpgroup"), which is why the repro uses jnp.concatenate throughout.
+
+
+NOTE ON THE ERROR MESSAGE
+-------------------------
+"Layout inference failed to find a solution. Consider adding layout annotations to your
+program to guide the search" is difficult to act on: it names neither the operation nor
+the conflicting layouts. Bisecting the failures above took a purpose-built harness that
+compiles one formulation at a time. Naming the primitive whose layout could not be
+resolved, and the layouts of its operands, would make these self-diagnosable.
+
+
+ATTACHED REPRO
+--------------
+See experiments/jax-issue/layout_inference_repro.py in
+https://github.com/<this repository>. It is self-contained (jax + jaxlib only), prints
+the table above, and takes a few seconds. Each variant is a separate small Pallas kernel
+so one failure does not mask the rest.

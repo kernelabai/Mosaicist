@@ -59,9 +59,12 @@ class FusedConfig:
 def _quantize_half(vals, gs, q_smem, pass_idx, sf_full, nb_total):
     """Quantize one 128-column half into `q_smem[pass_idx]`, accumulating its scales.
 
-    Same construction as `quantize_kernels._quantize_tile` -- sub-tiles of SUB_K columns
-    so the one-hot expansion stays cheap, and each sub-tile stored whole because a column
-    slice of the swizzled fp4 output cannot be written.
+    The values are assembled by concatenating the per-block quantized slices. That is
+    the cheap way, and it took a minimal repro to find that it is available at all: the
+    same concatenation applied to the *scale* vector has no layout solution, which is
+    why the earlier version of this kernel built a full-width divisor out of one-hot
+    masks for both. The scale vector still does that -- but it is (rows, 16), not
+    (rows, 128), so it costs almost nothing. See jax-bug-layout-inference.txt.
     """
     nsub, nb_sub = HALF // SUB_K, SUB_K // SF_VEC_SIZE
     # TCGEN05, not WGMMA: these values came out of TMEM via async_load_tmem, and the
@@ -69,7 +72,7 @@ def _quantize_half(vals, gs, q_smem, pass_idx, sf_full, nb_total):
     vals = plgpu.layout_cast(vals, plgpu.Layout.TCGEN05)
     for s in range(nsub):
         sub = vals[:, s * SUB_K:(s + 1) * SUB_K]
-        inv_sub = jnp.zeros((TMEM_ROWS, SUB_K), jnp.float32)  # overwritten block by block
+        blocks = []
         for j in range(nb_sub):
             block = sub[:, j * SF_VEC_SIZE:(j + 1) * SF_VEC_SIZE]
             amax = plgpu.layout_cast(jnp.max(jnp.abs(block), axis=-1),
@@ -77,13 +80,11 @@ def _quantize_half(vals, gs, q_smem, pass_idx, sf_full, nb_total):
             sf = jnp.clip(amax / FP4_MAX * gs, 0.0, SF_MAX).astype(SF_DTYPE).astype(jnp.float32)
             step = sf / gs
             inv = jnp.where(step > 0.0, 1.0, 0.0) / jnp.where(step == 0.0, 1.0, step)
-            inv_sub = jnp.where((jnp.arange(SUB_K) // SF_VEC_SIZE == j)[None, :],
-                                inv[:, None], inv_sub)  # select beats multiply-add here
+            blocks.append(jnp.clip(block * inv[:, None], -FP4_MAX, FP4_MAX))
             # this half owns scale columns [pass_idx * 8, +8) of the 256-wide tile
             col = pass_idx * (HALF // SF_VEC_SIZE) + s * nb_sub + j
-            sf_full += sf[:, None] * (
-                jnp.arange(nb_total) == col).astype(jnp.float32)[None, :]
-        q_smem[pass_idx, s] = jnp.clip(sub * inv_sub, -FP4_MAX, FP4_MAX).astype(FP4_DTYPE)
+            sf_full = jnp.where((jnp.arange(nb_total) == col)[None, :], sf[:, None], sf_full)
+        q_smem[pass_idx, s] = jnp.concatenate(blocks, axis=-1).astype(FP4_DTYPE)
     return sf_full
 
 

@@ -41,13 +41,13 @@ reference (it needs its own venv — torch, flashinfer, nvidia-cutlass-dsl).
 | stage | FlashInfer CuTeDSL | this port | gap |
 |---|---:|---:|---:|
 | quantize hidden (+ scale retile) | 10.9 µs | 13.0 µs | 1.19× |
-| gemm1 + silu_and_mul + quantize | 13.4 + 8.7 = 22.1 µs | 32.0 µs (one fused kernel) | 1.45× |
+| gemm1 + silu_and_mul + quantize | 13.4 + 8.7 = 22.1 µs | 31.2 µs (one fused kernel) | 1.41× |
 | gemm2 `(l,m,n)×(l,k,n)` | 9.4 µs · 1821 TFLOP/s | 13.0 µs · 1322 | 1.38× |
-| **end to end** | **46.0 µs** | **62.6 µs** | **1.36×** |
+| **end to end** | **46.0 µs** | **61.9 µs** | **1.35×** |
 | dense bf16 `jnp.einsum` baseline | 65.4 µs | | |
 
-**The port runs at 73% of the reference**, up from 55%, and now beats the dense bf16
-baseline (1.05×) which it previously lost to by a wide margin.
+**The port runs at 74% of the reference**, up from 55%, and now beats the dense bf16
+baseline (1.08×) which it previously lost to by a wide margin.
 
 About 6 µs of the 62.6 is XLA glue rather than kernels: two scale-retile transposes
 (~4 µs) and a launch for the per-expert alpha division (~2 µs) on `(l,)`-shaped arrays.
@@ -74,7 +74,7 @@ in a docstring, not what runs. The PTX says `cta_group::1` and `cluster [1,1,1]`
 shape the reference is **not** collective, which is consistent with the collective
 experiment below losing.
 
-Optimization took the port from 120.4 µs to 65.3 µs (1.84×), every step verified
+Optimization took the port from 120.4 µs to 61.9 µs (1.94×), every step verified
 bit-exact:
 
 | change | effect |
@@ -86,6 +86,7 @@ bit-exact:
 | warp split inside one warpgroup | gemm1 1855 → 1910 TFLOP/s |
 | **fusing GEMM1 + silu_and_mul + quantize** | **end to end 83.5 → 65.3 µs** |
 | select instead of multiply-add in the scale expansion | fused 34.1 → 32.5 µs |
+| values by concatenation, dropping the full-width expansion | fused 32.0 → 31.2 µs |
 
 That last row is the one worth dwelling on. Timed against each other as standalone
 kernels, the fused version beats the two it replaces by 2% -- 34.3 µs against 35.0 --
@@ -218,19 +219,25 @@ they are presumably what wins at larger tiles than the 128x128 the MMA scale pat
 here, and combining them (collective *and* warp-specialized, which is the reference's
 actual structure) is the one configuration not yet tried.
 
-**The one-hot scale expansion is forced, and it is expensive.** Widening a per-16-column
-scale back across the tile costs 9.5 µs of the fused kernel's 34 -- ablating it out drops
-the kernel to 24.7 µs. Every cheaper formulation (`jnp.repeat`, `broadcast_to` +
-`reshape`, per-block slice and concatenate) fails layout inference, now checked in *both*
-the WGMMA layout reading smem and the TCGEN05 layout reading TMEM. What did help was
-writing it as a `jnp.where` select rather than a multiply-add by a 0/1 mask: same result,
-1.6 µs cheaper. Its cost is proportional to the sub-tile width, and the floor there is
-the output store -- TMA wants 16 bytes per row, which at half a byte per e2m1 value is 32
-columns, and 32 produces wrong values (measured twice, in two different kernels), so 64.
+**Only the *scale vector* needs the one-hot workaround -- the values can be
+concatenated.** Widening a per-16-column scale back across the tile with one-hot masks
+cost 9.5 µs of the fused kernel's 34. Writing the minimal repro for the JAX issue
+(`../../jax-bug-layout-inference.txt`) disproved something this README previously
+asserted: `jnp.concatenate` of the per-block *quantized slices* lowers fine, including
+with an e2m1 output. It is `jnp.concatenate` of the reduced per-block *scales* into an
+(rows, blocks) array that has no layout solution. Assembling the values by concatenation
+and keeping one-hot accumulation only for the narrow scale vector removes the full-width
+expansion entirely.
 
-This is the clearest candidate for a JAX issue: a reduction over sub-row groups and the
-matching broadcast back are the natural way to express block-scaled quantization, and
-neither has a layout solution.
+What genuinely has no layout solution, checked in both the WGMMA layout reading smem and
+the TCGEN05 layout reading TMEM: the reshape-and-reduce spelling, `jnp.repeat`,
+`broadcast_to` + `reshape`, a `jnp.where` whose condition broadcasts from the reduced
+layout, and the scale-vector concatenate above. `jnp.stack` is simply unimplemented in
+this lowering. That is the JAX issue.
+
+The expansion's cost is proportional to the sub-tile width, and the floor there is the
+output store: TMA wants 16 bytes per row, which at half a byte per e2m1 value is 32
+columns, and 32 produces wrong values (measured twice, in two different kernels), so 64.
 
 **Values that come out of TMEM need `Layout.TCGEN05`, not `Layout.WGMMA`.** Every
 quantize kernel here starts from shared memory and uses WGMMA; the fused epilogue starts
