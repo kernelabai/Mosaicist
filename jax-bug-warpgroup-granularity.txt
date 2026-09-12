@@ -1,0 +1,84 @@
+Title: Mosaic GPU block size is a whole number of warpgroups, so the 6-warp
+       (192-thread) layout CUTLASS Blackwell GEMMs use cannot be expressed
+
+Component: Pallas / Mosaic GPU (jax.experimental.pallas.mosaic_gpu)
+Version:   jax 0.11.1, jaxlib 0.11.1
+Hardware:  NVIDIA B200 (sm_100a, CUDA 12.8, driver 570.148.08)
+Repro:     warpgroup_granularity_repro.py (attached below, self-contained)
+Kind:      missing capability, not a defect
+
+
+SUMMARY
+-------
+`plgpu.kernel(..., num_threads=N)` launches N *warpgroups*, so the reachable block
+sizes are 128, 256, 384 ... A warp-specialised Blackwell GEMM in CUTLASS/CuTeDSL
+typically launches **192 threads**: four warps running the epilogue, one warp issuing
+TMAs, and one warp issuing MMAs. That layout has no expression in Pallas, and the two
+reachable neighbours each give up something the 192-thread version keeps.
+
+Verified output of the attached repro:
+
+    jax 0.11.1 on NVIDIA B200
+
+     num_threads   threads launched
+            None                128
+               1                128
+               2                256
+               3                384
+
+    reachable block sizes are multiples of 128; 192 is not among them
+
+
+WHY IT MATTERS, WITH NUMBERS
+----------------------------
+Porting FlashInfer's CuTeDSL NVFP4 masked grouped GEMM to Pallas, the reference captures
+as:
+
+    grid [1, 1, 148]   block [192, 1, 1]   dynamic smem 226304
+
+One block per SM, six warps, nearly the whole shared memory. Reproducing it in Pallas
+means choosing between:
+
+  * **128 threads** (`num_threads=None`, warps split with `plgpu.warp_map`): warp 0
+    issues TMAs, warp 1 issues MMAs, and then all four warps run the epilogue. This is
+    the fastest arrangement we found, but a tile's epilogue cannot overlap the next
+    tile's loads, because the same warps do both.
+
+  * **256 threads** (`num_threads=2`): a dedicated epilogue warpgroup makes that overlap
+    possible, but the extra 128 threads cost the second resident block -- at 255
+    registers per thread, two 256-thread blocks do not fit -- and it measures slower
+    than the 128-thread version.
+
+The reference's 192 threads buy the overlap without paying the occupancy, because two
+extra warps is a quarter of a warpgroup rather than a whole one. Measured on the same
+problem (l=8, m=512, k=n=2048), the Pallas GEMM reaches 17.9 us against the reference's
+13.4, and this is the difference the remaining gap is concentrated in. The whole MoE
+path sits at 60.8 us against 46.0.
+
+
+WHAT WOULD HELP
+---------------
+Any of these removes the cliff:
+
+  1. Allow `num_threads` to be expressed in warps, or add a `num_warps=` alternative, so
+     a kernel can request 6 warps. The MMA and TMA "warpgroups" in such a kernel issue
+     single-thread operations (`tcgen05.mma`, TMA descriptors) and do not need a full
+     warpgroup's lanes.
+  2. Failing that, allow a warpgroup to be declared as *partial* -- e.g. a second
+     `num_threads` group that only materialises 2 warps -- since the constraint is
+     really that warpgroup-wide collectives (wgmma, layouts) need 128 lanes, and a
+     TMA/MMA-issuing group uses none of them.
+  3. Or document the cost explicitly in `plgpu.kernel`, so the choice between 128 and
+     256 is made knowingly. Today the docstring notes that `num_threads` counts
+     warpgroups, but not that this rules out the standard CUTLASS warp layout.
+
+`plgpu.warp_map` already gives per-warp roles *inside* a warpgroup, which is what makes
+the 128-thread arrangement above possible; the gap is only that the block cannot be
+sized in warps.
+
+
+ATTACHED REPRO
+--------------
+See experiments/jax-issue/warpgroup_granularity_repro.py. It launches a trivial kernel
+at several `num_threads` values and prints the block size the driver actually saw,
+read back from CUPTI activity records. Runs in a few seconds.
