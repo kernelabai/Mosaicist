@@ -55,7 +55,11 @@ class NumericsReport:
     def summary(self) -> str:
         head = "PASS" if self.passed else "FAIL"
         q = ", ".join(f"q{r.q:g}: cand {r.cand_err:.3g} vs ref {r.ref_err:.3g} ulp" for r in self.quantiles)
-        return (f"{head} [{self.fmt}] n={self.n} bitwise={self.bitwise_equal_fraction:.1%} "
+        # not .1%: 99.996% rounds to "100.0%", which reads as bit-identical right next
+        # to a non-zero max|ref-cand|
+        frac = self.bitwise_equal_fraction
+        shown = "100%" if frac == 1.0 else f"{min(frac, 0.99999):.3%}"
+        return (f"{head} [{self.fmt}] n={self.n} bitwise={shown} "
                 f"max|ref-cand|={self.max_ulp_ref_vs_cand} ulp; {q}"
                 + ("" if self.passed else " :: " + "; ".join(self.failures)))
 

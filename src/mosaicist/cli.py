@@ -114,6 +114,49 @@ def _cmd_check(args) -> int:
     return 0 if report.passed else 1
 
 
+def _cmd_capture(args) -> int:
+    from .capture import capture, capture_subprocess
+
+    if args.in_process:
+        b = capture(args.entry, args.compiler, args.out, reps=args.reps, arch=args.arch,
+                    prefer=args.prefer, name=args.name)
+    else:
+        b = capture_subprocess(args.entry, args.compiler, args.out,
+                               python=args.python, reps=args.reps)
+    times = sorted(b.timings)
+    med = times[len(times) // 2] if times else float("nan")
+    print(f"{b.kind} bundle {args.out}: ptx={b.ptx} sass={b.sass} "
+          f"median {med:.1f} us over {len(times)} reps")
+    return 0
+
+
+def _cmd_translate(args) -> int:
+    from .contract import Contract
+    from .translate import emit_v0
+
+    contract = Contract.load(args.contract)
+    path = emit_v0(contract, args.out)
+    print(f"wrote {path} for {contract.name} ({contract.arch}, {contract.mma})")
+    if contract.deferred:
+        print("deferred from the reference: " + ", ".join(contract.deferred))
+    return 0
+
+
+def _cmd_converge(args) -> int:
+    from .bundle import Bundle
+    from .converge.loop import LoopConfig, converge
+
+    result = converge(
+        reference=Bundle.load(args.ref),
+        candidate_entry=args.entry,
+        knobs_module=args.knobs,
+        outdir=args.out,
+        config=LoopConfig(max_steps=args.steps, reps=args.reps, python=args.python),
+    )
+    print(result.summary())
+    return 0 if result.converged else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="mosaicist", description=__doc__.split("\n\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -150,6 +193,34 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--tau", type=float, default=1.0, help="absolute slack in ULPs")
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=_cmd_check)
+
+    p = sub.add_parser("capture", help="run one kernel with dumping on and write a bundle")
+    p.add_argument("entry", help="module:function returning (callable, args); default fn 'build'")
+    p.add_argument("--compiler", choices=("pallas", "cutedsl"), required=True)
+    p.add_argument("--out", required=True, help="bundle directory to write")
+    p.add_argument("--reps", type=int, default=30)
+    p.add_argument("--arch", help="sm_90a / sm_100a, recorded in the bundle")
+    p.add_argument("--prefer", help="substring picking the kernel when several are dumped")
+    p.add_argument("--name")
+    p.add_argument("--python", help="interpreter for the capture subprocess")
+    p.add_argument("--in-process", action="store_true",
+                   help="assume the dump environment is already set (used by the driver)")
+    p.set_defaults(func=_cmd_capture)
+
+    p = sub.add_parser("translate", help="emit a naive v0 Pallas kernel from a contract")
+    p.add_argument("contract", help="contract JSON")
+    p.add_argument("--out", required=True, help="path for the generated module")
+    p.set_defaults(func=_cmd_translate)
+
+    p = sub.add_parser("converge", help="tune a candidate toward a reference bundle")
+    p.add_argument("ref", help="reference bundle directory")
+    p.add_argument("entry", help="candidate module:function exposing build()/knobs")
+    p.add_argument("--knobs", help="module declaring the knob space (default: the entry module)")
+    p.add_argument("--out", required=True, help="directory for per-step bundles")
+    p.add_argument("--steps", type=int, default=12)
+    p.add_argument("--reps", type=int, default=30)
+    p.add_argument("--python", help="interpreter for capture subprocesses")
+    p.set_defaults(func=_cmd_converge)
 
     args = ap.parse_args(argv)
     return args.func(args)
