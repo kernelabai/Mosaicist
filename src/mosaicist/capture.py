@@ -211,6 +211,18 @@ def capture(entry: str, compiler: str, outdir: str | Path, *, name: str | None =
             except Exception:  # noqa: BLE001 - narrow dtypes numpy cannot hold
                 np.save(out / f"out{i}.npy", np.asarray(a).view(np.uint8))
 
+        # the float64 oracle, if the module offers one: the numerics gate needs a third
+        # opinion, and computing it here keeps it beside the outputs it judges
+        module = importlib.import_module(entry.partition(":")[0])
+        oracle_fn = getattr(module, "reference", None)
+        if callable(oracle_fn):
+            try:
+                ref_out = oracle_fn(*args)
+                for i, a in enumerate(ref_out if isinstance(ref_out, (tuple, list)) else [ref_out]):
+                    np.save(out / f"oracle{i}.npy", np.asarray(a, dtype=np.float64))
+            except Exception:  # noqa: BLE001 - an oracle is optional
+                pass
+
     bundle = Bundle(kind=KIND_OF[compiler], name=name or entry, arch=arch,
                     ptx=found["ptx"], ptxas_log=found["ptxas_log"], sass=found["sass"],
                     source=entry, launch=launch, timings=times, resources=resources,
