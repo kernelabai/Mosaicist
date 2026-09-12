@@ -1,0 +1,16 @@
+flowchart LR
+    H["hidden<br/><code>(l,m,k) bf16</code>"]
+    Q1["quantize<br/><code>→ e2m1 + e4m3 scales</code>"]
+    G1["GEMM1<br/><code>× w1 (l,2n,k)</code>"]
+    GU["gateup<br/><code>(l,m,2n) bf16</code>"]
+    SQ["silu_and_mul<br/>+ quantize"]
+    G2["GEMM2<br/><code>× w2 (l,k,n)</code>"]
+    O["out<br/><code>(l,m,k) bf16</code>"]
+
+    H --> Q1 --> G1 --> GU --> SQ --> G2 --> O
+
+    subgraph FUSED["this port fuses these three into one kernel"]
+        G1
+        GU
+        SQ
+    end

@@ -1,0 +1,30 @@
+flowchart LR
+    subgraph REF["Reference (CuTeDSL) — runs once"]
+        A["CuTeDSL kernel<br/><code>@cute.jit + args</code>"]
+        B["Capture<br/><code>--keep-ptx/cubin</code>"]
+        C["Reference bundle<br/><code>PTX·SASS·y·t_ref</code>"]
+    end
+
+    subgraph CAND["Candidate (Pallas Mosaic GPU) — loop"]
+        T["Naive translate<br/><code>structure-kept</code>"]
+        P["Pallas kernel vN<br/><code>plgpu source</code>"]
+        E["Evaluate<br/><code>build·check·time</code>"]
+        X["Edit<br/><code>tune · rewrite</code>"]
+    end
+
+    D["Fingerprint diff<br/><code>layers L0–L5</code>"]
+    G["Diagnose<br/><code>diff → fixes</code>"]
+    R["Report<br/><code>kernel + residuals</code>"]
+
+    A -- trace --> B
+    B -- run --> C
+    C -- reference --> D
+    A -- "source + contract" --> T
+    T -- v0 --> P
+    P -- vN --> E
+    E -- bundle --> D
+    D -- "Δt ≤ noise" --> R
+    D -- "ranked Δ" --> G
+    G -- fix --> X
+    E -. "numerics fail" .-> X
+    X -- "vN+1" --> P
