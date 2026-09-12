@@ -41,12 +41,16 @@ reference (it needs its own venv — torch, flashinfer, nvidia-cutlass-dsl).
 | stage | FlashInfer CuTeDSL | this port | gap |
 |---|---:|---:|---:|
 | quantize hidden (+ scale retile) | 10.9 µs | 13.0 µs | 1.19× |
-| gemm1 + silu_and_mul + quantize | 13.4 + 8.7 = 22.1 µs | 31.2 µs (one fused kernel) | 1.41× |
+| gemm1 + silu_and_mul + quantize | 13.4 + 8.7 = 22.1 µs | 31.6 µs (one fused kernel) | 1.43× |
 | gemm2 `(l,m,n)×(l,k,n)` | 9.4 µs · 1821 TFLOP/s | 13.0 µs · 1322 | 1.38× |
-| **end to end** | **46.0 µs** | **61.9 µs** | **1.35×** |
+| **end to end** | **46.0 µs** | **60.8 µs** | **1.32×** |
 | dense bf16 `jnp.einsum` baseline | 65.4 µs | | |
 
-**The port runs at 74% of the reference**, up from 55%, and now beats the dense bf16
+Both figures are medians of repeated captures. The reference's own run-to-run spread is
+1.0%; this port's is nearer 2%, which is why the last few tuning steps below are reported
+as inside the noise rather than as wins.
+
+**The port runs at 76% of the reference**, up from 55%, and now beats the dense bf16
 baseline (1.08×) which it previously lost to by a wide margin.
 
 About 6 µs of the 62.6 is XLA glue rather than kernels: two scale-retile transposes
@@ -316,6 +320,33 @@ sits exactly on TMA's 16-byte minimum row and produces wrong values, so 64 is th
 **Scales reach the MMA in a tiling, not row-major**, and `test_nvfp4.py` checks
 `to_mma_scale_layout` element-by-element against the PTX spec's index mapping rather
 than trusting the reshape.
+
+## Why parity is not reachable from here
+
+Tuning is exhausted: the last several changes all landed inside the measurement noise,
+and the convergence loop's own report now lists only structural items. The decisive one
+cannot be expressed.
+
+The reference launches **192 threads** — six warps: four for the epilogue, one issuing
+TMAs, one issuing MMAs. Pallas cannot launch that. Its `num_threads` counts *warpgroups*,
+not threads ("these do not correspond to CUDA threads, but rather to warpgroups on Hopper
+and Blackwell GPUs"), so a block is 128 threads or 256, never 192. Both were measured:
+
+* 128 threads with the warp split — warps 0 and 1 issue TMAs and MMAs, then all four
+  run the epilogue. This is the fastest thing here, and it cannot overlap one tile's
+  epilogue with the next tile's loads, because the same warps do both.
+* 256 threads with a dedicated epilogue warpgroup — that overlap becomes possible, but
+  the extra 128 threads cost the second resident block, and it measures slower.
+
+The reference's 192 buys the overlap without the occupancy. That is a two-warp
+difference, and it is not a tuning parameter.
+
+The other named gaps are smaller and also structural: our TMA descriptors are 5-D where
+the reference's are 3-D and 4-D, our epilogue uses `stmatrix` and the reference's does
+not, and the fused kernel's extra arithmetic shows up as L4 flavor rows (`ex2`, `div`,
+`cvt`) that the reference does not have because it keeps activation and quantization in
+a separate kernel. PTX parity is therefore not a realistic target for this pair; runtime
+parity would need the 192-thread layout.
 
 ## Known limitations, in the order worth fixing
 

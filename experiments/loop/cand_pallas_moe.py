@@ -44,9 +44,9 @@ def build():
     masked_m = jnp.full((L,), M, jnp.int32)
     kw, _ = make_moe_inputs(jax.random.key(0), L, M, K, N, masked_m)
     kw["gemm2_config"] = GemmConfig(block_k=k["gemm2_block_k"], stages=k["gemm2_stages"])
+    kw["fused_config"] = FusedConfig(block_k=k["fused_block_k"], stages=k["fused_stages"])
 
-    import gemm1_silu_quantize as g
-
-    g.FusedConfig.__init__.__defaults__ = (k["fused_block_k"], k["fused_stages"])
-    fn = jax.jit(moe_mod.moe_masked)
+    # the configs are frozen dataclasses, not arrays: jit needs them marked static
+    fn = jax.jit(moe_mod.moe_masked,
+                 static_argnames=("gemm1_config", "gemm2_config", "fused_config"))
     return (lambda: fn(**kw)), ()

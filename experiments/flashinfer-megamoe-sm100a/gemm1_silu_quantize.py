@@ -52,8 +52,11 @@ TMA_WARP, MMA_WARP = 0, 1
 
 @dataclasses.dataclass(frozen=True)
 class FusedConfig:
-    block_k: int = 128  # measured best: 3 stages of 128 beat 2 of 256, unlike the plain
-    stages: int = 3  # GEMM, because three operand streams make each stage 1.5x as big
+    # Found by the convergence loop on the whole MoE, not by tuning this kernel alone:
+    # in isolation 128/3 looks better than 256/3, but end to end 256/3 wins. Timing a
+    # kernel by itself misses what it costs the pipeline around it.
+    block_k: int = 256
+    stages: int = 3
 
 
 def _quantize_half(vals, gs, q_smem, pass_idx, sf_full, nb_total):

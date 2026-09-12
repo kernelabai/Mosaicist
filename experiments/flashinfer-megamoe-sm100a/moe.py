@@ -27,7 +27,9 @@ import jax.numpy as jnp
 
 from gemm1_silu_quantize import FusedConfig, gemm1_silu_quantize
 from masked_gemm import GemmConfig
-from masked_gemm_ws import masked_grouped_gemm_w1 as masked_grouped_gemm
+# persistent + warp-split: the contract extracted from the CuTeDSL reference says it is
+# both, and measured here the pair is worth ~1 us end to end over the non-persistent one
+from masked_gemm_ws import masked_grouped_gemm_w1p as masked_grouped_gemm
 from nvfp4 import to_mma_scale_layout
 
 FUSE_GEMM1 = True
@@ -57,6 +59,7 @@ def moe_masked(
     a2_global_scale: jax.Array,  # (l,) f32
     gemm1_config: GemmConfig = GemmConfig(),
     gemm2_config: GemmConfig = GemmConfig(),
+    fused_config: FusedConfig = FusedConfig(),
 ) -> jax.Array:
     """(l, m, k) bf16 in, (l, m, k) bf16 out. Rows >= masked_m[l] are undefined."""
     a_q, a_sf = quantize_nvfp4_pallas(hidden, input_global_scale, masked_m)
@@ -64,7 +67,7 @@ def moe_masked(
     if FUSE_GEMM1:
         d_q, d_sf = gemm1_silu_quantize(
             a_q, _retile(a_sf), w1_q, w1_sf, g1_alpha, a2_global_scale, masked_m,
-            FusedConfig(),
+            fused_config,
         )
     else:
         gateup = masked_grouped_gemm(a_q, _retile(a_sf), w1_q, w1_sf, g1_alpha,
