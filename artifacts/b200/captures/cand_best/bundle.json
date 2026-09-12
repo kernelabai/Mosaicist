@@ -1,0 +1,59 @@
+{
+  "kind": "candidate",
+  "name": "cand_pallas_gemm",
+  "arch": null,
+  "entry": null,
+  "ptx": "kernel.ptx",
+  "ptxas_log": null,
+  "sass": null,
+  "source": "cand_pallas_gemm",
+  "launch": {
+    "grid": [
+      16,
+      4,
+      8
+    ],
+    "block": [
+      128,
+      1,
+      1
+    ],
+    "cluster": [
+      1,
+      1,
+      1
+    ],
+    "dynamic_smem": 106524
+  },
+  "timings": [
+    18.72,
+    18.72,
+    18.368,
+    18.176,
+    18.271,
+    18.176,
+    18.176,
+    18.432,
+    18.656,
+    18.495,
+    18.592,
+    18.144,
+    18.368,
+    18.176,
+    18.272,
+    18.559,
+    18.752,
+    18.4,
+    18.56,
+    18.464
+  ],
+  "resources": {
+    "registers": 150,
+    "static_smem": 1,
+    "local_mem_per_thread": 0
+  },
+  "versions": {
+    "python": "3.12.14",
+    "ptxas": "Build cuda_12.8.r12.8/compiler.35583870_0"
+  }
+}

@@ -1,0 +1,312 @@
+cuBLAS < 13.2 (120902 found) has a known issue where many kernels free TMEM buffers multiple times. Executing a cuBLAS kernel concurrently with another kernel (e.g. on another stream) can lead to silent data corruption.
+nvdisasm invocation failed: INTERNAL: Process spawn failed: No such file or directory
+=== Source Location Trace: ===
+jaxlib/mosaic/gpu/dump.cc:134
+
+nvdisasm invocation failed: INTERNAL: Process spawn failed: No such file or directory
+=== Source Location Trace: ===
+jaxlib/mosaic/gpu/dump.cc:134
+
+nvdisasm invocation failed: INTERNAL: Process spawn failed: No such file or directory
+=== Source Location Trace: ===
+jaxlib/mosaic/gpu/dump.cc:134
+
+candidate bundle bundles/moerun/step00: ptx=kernel.ptx sass=None median 71.0 us over 20 reps
+cuBLAS < 13.2 (120902 found) has a known issue where many kernels free TMEM buffers multiple times. Executing a cuBLAS kernel concurrently with another kernel (e.g. on another stream) can lead to silent data corruption.
+nvdisasm invocation failed: INTERNAL: Process spawn failed: No such file or directory
+=== Source Location Trace: ===
+jaxlib/mosaic/gpu/dump.cc:134
+
+nvdisasm invocation failed: INTERNAL: Process spawn failed: No such file or directory
+=== Source Location Trace: ===
+jaxlib/mosaic/gpu/dump.cc:134
+
+nvdisasm invocation failed: INTERNAL: Process spawn failed: No such file or directory
+=== Source Location Trace: ===
+jaxlib/mosaic/gpu/dump.cc:134
+
+candidate bundle bundles/moerun/step01: ptx=kernel.ptx sass=None median 64.9 us over 20 reps
+cuBLAS < 13.2 (120902 found) has a known issue where many kernels free TMEM buffers multiple times. Executing a cuBLAS kernel concurrently with another kernel (e.g. on another stream) can lead to silent data corruption.
+nvdisasm invocation failed: INTERNAL: Process spawn failed: No such file or directory
+=== Source Location Trace: ===
+jaxlib/mosaic/gpu/dump.cc:134
+
+nvdisasm invocation failed: INTERNAL: Process spawn failed: No such file or directory
+=== Source Location Trace: ===
+jaxlib/mosaic/gpu/dump.cc:134
+
+nvdisasm invocation failed: INTERNAL: Process spawn failed: No such file or directory
+=== Source Location Trace: ===
+jaxlib/mosaic/gpu/dump.cc:134
+
+candidate bundle bundles/moerun/step02: ptx=kernel.ptx sass=None median 64.2 us over 20 reps
+cuBLAS < 13.2 (120902 found) has a known issue where many kernels free TMEM buffers multiple times. Executing a cuBLAS kernel concurrently with another kernel (e.g. on another stream) can lead to silent data corruption.
+nvdisasm invocation failed: INTERNAL: Process spawn failed: No such file or directory
+=== Source Location Trace: ===
+jaxlib/mosaic/gpu/dump.cc:134
+
+nvdisasm invocation failed: INTERNAL: Process spawn failed: No such file or directory
+=== Source Location Trace: ===
+jaxlib/mosaic/gpu/dump.cc:134
+
+nvdisasm invocation failed: INTERNAL: Process spawn failed: No such file or directory
+=== Source Location Trace: ===
+jaxlib/mosaic/gpu/dump.cc:134
+
+candidate bundle bundles/moerun/step03: ptx=kernel.ptx sass=None median 72.0 us over 20 reps
+cuBLAS < 13.2 (120902 found) has a known issue where many kernels free TMEM buffers multiple times. Executing a cuBLAS kernel concurrently with another kernel (e.g. on another stream) can lead to silent data corruption.
+Traceback (most recent call last):
+  File "/home/ubuntu/venv-jax/lib/python3.12/site-packages/jax/_src/pallas/mosaic_gpu/core.py", line 393, in wrapper
+    outs = pallas_helpers.kernel(
+  File "/home/ubuntu/venv-jax/lib/python3.12/site-packages/jax/_src/pallas/mpmd.py", line 1011, in wrapper
+    flat_outs = mpmd_map_p.bind(
+jax._src.source_info_util.JaxStackTraceBeforeTransformation: ValueError: Mosaic GPU kernel exceeds available shared memory: smem_bytes=254012 > max_smem_bytes=232448
+
+The preceding stack trace is the source of the JAX operation that, once transformed by JAX, triggered the following exception.
+
+--------------------
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/ubuntu/mosaicist/src/mosaicist/cli.py", line 269, in <module>
+    sys.exit(main())
+             ^^^^^^
+  File "/home/ubuntu/mosaicist/src/mosaicist/cli.py", line 265, in main
+    return args.func(args)
+           ^^^^^^^^^^^^^^^
+  File "/home/ubuntu/mosaicist/src/mosaicist/cli.py", line 121, in _cmd_capture
+    b = capture(args.entry, args.compiler, args.out, reps=args.reps, arch=args.arch,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/mosaicist/src/mosaicist/capture.py", line 244, in capture
+    times, resources, launch, result = time_and_record(fn, args, reps, warmup, measure)
+                                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/mosaicist/src/mosaicist/capture.py", line 142, in time_and_record
+    out = fn(*args)
+          ^^^^^^^^^
+  File "/home/ubuntu/mosaicist/experiments/loop/cand_pallas_moe.py", line 52, in <lambda>
+    return (lambda: fn(**kw)), ()
+                    ^^^^^^^^
+  File "/home/ubuntu/venv-jax/lib/python3.12/site-packages/jax/_src/pallas/mpmd.py", line 668, in _mpmd_map_lowering
+    return _mpmd_map_mgpu_lowering(ctx, *in_nodes, **params)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/venv-jax/lib/python3.12/site-packages/jax/_src/pallas/mpmd.py", line 653, in _mpmd_map_mgpu_lowering
+    return pallas_call_registration.mpmd_map_mgpu_lowering_rule(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/venv-jax/lib/python3.12/site-packages/jax/_src/pallas/mosaic_gpu/pallas_call_registration.py", line 245, in mpmd_map_mgpu_lowering_rule
+    lowering_result = lowering.lower_unpipelined_jaxpr_to_module(
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/venv-jax/lib/python3.12/site-packages/jax/_src/pallas/mosaic_gpu/lowering.py", line 928, in lower_unpipelined_jaxpr_to_module
+    return lower_jaxpr_to_module(
+           ^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/venv-jax/lib/python3.12/site-packages/jax/_src/pallas/mosaic_gpu/lowering.py", line 1160, in lower_jaxpr_to_module
+    module, new_out_shapes, _, launch_ctx = mgpu_core._lower_as_gpu_kernel(
+                                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/venv-jax/lib/python3.12/site-packages/jax/experimental/mosaic/gpu/core.py", line 868, in _lower_as_gpu_kernel
+    @func.FuncOp.from_py_func(ptr_ty, ptr_ty, name=f"{kernel_name}_mosaic_gpu")
+     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/venv-jax/lib/python3.12/site-packages/jaxlib/mlir/dialects/func.py", line 197, in decorator
+    return_values = f(*func_args, **func_kwargs)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/venv-jax/lib/python3.12/site-packages/jax/experimental/mosaic/gpu/core.py", line 903, in main
+    with _launch(
+         ^^^^^^^^
+  File "/home/ubuntu/.local/share/uv/python/cpython-3.12.14-linux-x86_64-gnu/lib/python3.12/contextlib.py", line 137, in __enter__
+    return next(self.gen)
+^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/venv-jax/lib/python3.12/site-packages/jax/experimental/mosaic/gpu/core.py", line 651, in _launch
+    raise ValueError("Mosaic GPU kernel exceeds available shared memory: "
+ValueError: Mosaic GPU kernel exceeds available shared memory: smem_bytes=254012 > max_smem_bytes=232448
+--------------------
+For simplicity, JAX has removed its internal frames from the traceback of the following exception. Set JAX_TRACEBACK_FILTERING=off to include these.
+cuBLAS < 13.2 (120902 found) has a known issue where many kernels free TMEM buffers multiple times. Executing a cuBLAS kernel concurrently with another kernel (e.g. on another stream) can lead to silent data corruption.
+nvdisasm invocation failed: INTERNAL: Process spawn failed: No such file or directory
+=== Source Location Trace: === 
+jaxlib/mosaic/gpu/dump.cc:134
+
+nvdisasm invocation failed: INTERNAL: Process spawn failed: No such file or directory
+=== Source Location Trace: === 
+jaxlib/mosaic/gpu/dump.cc:134
+
+nvdisasm invocation failed: INTERNAL: Process spawn failed: No such file or directory
+=== Source Location Trace: === 
+jaxlib/mosaic/gpu/dump.cc:134
+
+candidate bundle bundles/moerun/step05: ptx=kernel.ptx sass=None median 62.3 us over 20 reps
+cuBLAS < 13.2 (120902 found) has a known issue where many kernels free TMEM buffers multiple times. Executing a cuBLAS kernel concurrently with another kernel (e.g. on another stream) can lead to silent data corruption.
+nvdisasm invocation failed: INTERNAL: Process spawn failed: No such file or directory
+=== Source Location Trace: ===
+jaxlib/mosaic/gpu/dump.cc:134
+
+nvdisasm invocation failed: INTERNAL: Process spawn failed: No such file or directory
+=== Source Location Trace: ===
+jaxlib/mosaic/gpu/dump.cc:134
+
+nvdisasm invocation failed: INTERNAL: Process spawn failed: No such file or directory
+=== Source Location Trace: ===
+jaxlib/mosaic/gpu/dump.cc:134
+
+candidate bundle bundles/moerun/step06: ptx=kernel.ptx sass=None median 69.0 us over 20 reps
+cuBLAS < 13.2 (120902 found) has a known issue where many kernels free TMEM buffers multiple times. Executing a cuBLAS kernel concurrently with another kernel (e.g. on another stream) can lead to silent data corruption.
+nvdisasm invocation failed: INTERNAL: Process spawn failed: No such file or directory
+=== Source Location Trace: === 
+jaxlib/mosaic/gpu/dump.cc:134
+
+nvdisasm invocation failed: INTERNAL: Process spawn failed: No such file or directory
+=== Source Location Trace: === 
+jaxlib/mosaic/gpu/dump.cc:134
+
+nvdisasm invocation failed: INTERNAL: Process spawn failed: No such file or directory
+=== Source Location Trace: === 
+jaxlib/mosaic/gpu/dump.cc:134
+
+candidate bundle bundles/moerun/step07: ptx=kernel.ptx sass=None median 63.9 us over 20 reps
+cuBLAS < 13.2 (120902 found) has a known issue where many kernels free TMEM buffers multiple times. Executing a cuBLAS kernel concurrently with another kernel (e.g. on another stream) can lead to silent data corruption.
+nvdisasm invocation failed: INTERNAL: Process spawn failed: No such file or directory
+=== Source Location Trace: ===
+jaxlib/mosaic/gpu/dump.cc:134
+
+nvdisasm invocation failed: INTERNAL: Process spawn failed: No such file or directory
+=== Source Location Trace: ===
+jaxlib/mosaic/gpu/dump.cc:134
+
+nvdisasm invocation failed: INTERNAL: Process spawn failed: No such file or directory
+=== Source Location Trace: ===
+jaxlib/mosaic/gpu/dump.cc:134
+
+candidate bundle bundles/moerun/step08: ptx=kernel.ptx sass=None median 68.6 us over 20 reps
+cuBLAS < 13.2 (120902 found) has a known issue where many kernels free TMEM buffers multiple times. Executing a cuBLAS kernel concurrently with another kernel (e.g. on another stream) can lead to silent data corruption.
+Traceback (most recent call last):
+  File "/home/ubuntu/venv-jax/lib/python3.12/site-packages/jax/_src/pallas/mosaic_gpu/core.py", line 393, in wrapper
+    outs = pallas_helpers.kernel(
+  File "/home/ubuntu/venv-jax/lib/python3.12/site-packages/jax/_src/pallas/mpmd.py", line 1011, in wrapper
+    flat_outs = mpmd_map_p.bind(
+jax._src.source_info_util.JaxStackTraceBeforeTransformation: ValueError: Mosaic GPU kernel exceeds available shared memory: smem_bytes=254012 > max_smem_bytes=232448
+
+The preceding stack trace is the source of the JAX operation that, once transformed by JAX, triggered the following exception.
+
+--------------------
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/ubuntu/mosaicist/src/mosaicist/cli.py", line 269, in <module>
+    sys.exit(main())
+             ^^^^^^
+  File "/home/ubuntu/mosaicist/src/mosaicist/cli.py", line 265, in main
+    return args.func(args)
+           ^^^^^^^^^^^^^^^
+  File "/home/ubuntu/mosaicist/src/mosaicist/cli.py", line 121, in _cmd_capture
+    b = capture(args.entry, args.compiler, args.out, reps=args.reps, arch=args.arch,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/mosaicist/src/mosaicist/capture.py", line 244, in capture
+    times, resources, launch, result = time_and_record(fn, args, reps, warmup, measure)
+                                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/mosaicist/src/mosaicist/capture.py", line 142, in time_and_record
+    out = fn(*args)
+          ^^^^^^^^^
+  File "/home/ubuntu/mosaicist/experiments/loop/cand_pallas_moe.py", line 52, in <lambda>
+    return (lambda: fn(**kw)), ()
+                    ^^^^^^^^
+  File "/home/ubuntu/venv-jax/lib/python3.12/site-packages/jax/_src/pallas/mpmd.py", line 668, in _mpmd_map_lowering
+    return _mpmd_map_mgpu_lowering(ctx, *in_nodes, **params)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/venv-jax/lib/python3.12/site-packages/jax/_src/pallas/mpmd.py", line 653, in _mpmd_map_mgpu_lowering
+    return pallas_call_registration.mpmd_map_mgpu_lowering_rule(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/venv-jax/lib/python3.12/site-packages/jax/_src/pallas/mosaic_gpu/pallas_call_registration.py", line 245, in mpmd_map_mgpu_lowering_rule
+    lowering_result = lowering.lower_unpipelined_jaxpr_to_module(
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/venv-jax/lib/python3.12/site-packages/jax/_src/pallas/mosaic_gpu/lowering.py", line 928, in lower_unpipelined_jaxpr_to_module
+    return lower_jaxpr_to_module(
+           ^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/venv-jax/lib/python3.12/site-packages/jax/_src/pallas/mosaic_gpu/lowering.py", line 1160, in lower_jaxpr_to_module
+    module, new_out_shapes, _, launch_ctx = mgpu_core._lower_as_gpu_kernel(
+                                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/venv-jax/lib/python3.12/site-packages/jax/experimental/mosaic/gpu/core.py", line 868, in _lower_as_gpu_kernel
+    @func.FuncOp.from_py_func(ptr_ty, ptr_ty, name=f"{kernel_name}_mosaic_gpu")
+     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/venv-jax/lib/python3.12/site-packages/jaxlib/mlir/dialects/func.py", line 197, in decorator
+    return_values = f(*func_args, **func_kwargs)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/venv-jax/lib/python3.12/site-packages/jax/experimental/mosaic/gpu/core.py", line 903, in main
+    with _launch(
+         ^^^^^^^^
+  File "/home/ubuntu/.local/share/uv/python/cpython-3.12.14-linux-x86_64-gnu/lib/python3.12/contextlib.py", line 137, in __enter__
+    return next(self.gen)
+^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/venv-jax/lib/python3.12/site-packages/jax/experimental/mosaic/gpu/core.py", line 651, in _launch
+    raise ValueError("Mosaic GPU kernel exceeds available shared memory: "
+ValueError: Mosaic GPU kernel exceeds available shared memory: smem_bytes=254012 > max_smem_bytes=232448
+--------------------
+For simplicity, JAX has removed its internal frames from the traceback of the following exception. Set JAX_TRACEBACK_FILTERING=off to include these.
+cuBLAS < 13.2 (120902 found) has a known issue where many kernels free TMEM buffers multiple times. Executing a cuBLAS kernel concurrently with another kernel (e.g. on another stream) can lead to silent data corruption.
+nvdisasm invocation failed: INTERNAL: Process spawn failed: No such file or directory
+=== Source Location Trace: ===
+jaxlib/mosaic/gpu/dump.cc:134
+
+nvdisasm invocation failed: INTERNAL: Process spawn failed: No such file or directory
+=== Source Location Trace: ===
+jaxlib/mosaic/gpu/dump.cc:134
+
+nvdisasm invocation failed: INTERNAL: Process spawn failed: No such file or directory
+=== Source Location Trace: ===
+jaxlib/mosaic/gpu/dump.cc:134
+
+candidate bundle bundles/moerun/step10: ptx=kernel.ptx sass=None median 60.0 us over 20 reps
+cuBLAS < 13.2 (120902 found) has a known issue where many kernels free TMEM buffers multiple times. Executing a cuBLAS kernel concurrently with another kernel (e.g. on another stream) can lead to silent data corruption.
+nvdisasm invocation failed: INTERNAL: Process spawn failed: No such file or directory
+=== Source Location Trace: === 
+jaxlib/mosaic/gpu/dump.cc:134
+
+nvdisasm invocation failed: INTERNAL: Process spawn failed: No such file or directory
+=== Source Location Trace: === 
+jaxlib/mosaic/gpu/dump.cc:134
+
+nvdisasm invocation failed: INTERNAL: Process spawn failed: No such file or directory
+=== Source Location Trace: === 
+jaxlib/mosaic/gpu/dump.cc:134
+
+candidate bundle bundles/moerun/step11: ptx=kernel.ptx sass=None median 66.9 us over 20 reps
+reference 46.0 us, noise floor 1.0%
+
+   0 accept      71.0 us  D=0.507  numerics ok  {"fuse_gemm1": true, "fused_block_k": 128, "fused_stages": 2, "gemm2_block_k": 128, "gemm2_persistent": false, "gemm2_stages": 1}
+          next: [P1 rewrite] 1 warpgroup per CTA; reference runs 2
+   1 accept      64.9 us  D=0.507  numerics ok  {"fuse_gemm1": true, "fused_block_k": 128, "fused_stages": 2, "gemm2_block_k": 256, "gemm2_persistent": false, "gemm2_stages": 1}
+          next: [P1 rewrite] 1 warpgroup per CTA; reference runs 2
+   2 accept      64.2 us  D=0.507  numerics ok  {"fuse_gemm1": true, "fused_block_k": 128, "fused_stages": 2, "gemm2_block_k": 512, "gemm2_persistent": false, "gemm2_stages": 1}
+          next: [P1 rewrite] 1 warpgroup per CTA; reference runs 2
+   3   --        72.0 us  D=0.507  numerics ok  {"fuse_gemm1": true, "fused_block_k": 128, "fused_stages": 2, "gemm2_block_k": 512, "gemm2_persistent": false, "gemm2_stages": 2}
+          next: [P1 rewrite] 1 warpgroup per CTA; reference runs 2
+   4  ----   capture failed: Command '['/home/ubuntu/venv-jax/bin/python', '-m', 'mosaicist.cli', 'capture', 'cand_pallas_moe', '--compiler', 'pallas  {"fuse_gemm1": true, "fused_block_k": 128, "fused_stages": 2, "gemm2_block_k": 512, "gemm2_persistent": false, "gemm2_stages": 3}
+   5 accept      62.3 us  D=0.411  numerics ok  {"fuse_gemm1": true, "fused_block_k": 256, "fused_stages": 2, "gemm2_block_k": 512, "gemm2_persistent": false, "gemm2_stages": 1}
+          next: [P1 rewrite] 1 warpgroup per CTA; reference runs 2
+   6   --        69.0 us  D=0.411  numerics ok  {"fuse_gemm1": true, "fused_block_k": 256, "fused_stages": 2, "gemm2_block_k": 128, "gemm2_persistent": false, "gemm2_stages": 1}
+          next: [P1 rewrite] 1 warpgroup per CTA; reference runs 2
+   7   --        63.9 us  D=0.411  numerics ok  {"fuse_gemm1": true, "fused_block_k": 256, "fused_stages": 2, "gemm2_block_k": 256, "gemm2_persistent": false, "gemm2_stages": 1}
+          next: [P1 rewrite] 1 warpgroup per CTA; reference runs 2
+   8   --        68.6 us  D=0.411  numerics ok  {"fuse_gemm1": true, "fused_block_k": 256, "fused_stages": 2, "gemm2_block_k": 512, "gemm2_persistent": false, "gemm2_stages": 2}
+          next: [P1 rewrite] 1 warpgroup per CTA; reference runs 2
+   9  ----   capture failed: Command '['/home/ubuntu/venv-jax/bin/python', '-m', 'mosaicist.cli', 'capture', 'cand_pallas_moe', '--compiler', 'pallas  {"fuse_gemm1": true, "fused_block_k": 256, "fused_stages": 2, "gemm2_block_k": 512, "gemm2_persistent": false, "gemm2_stages": 3}
+  10 accept      60.0 us  D=0.411  numerics ok  {"fuse_gemm1": true, "fused_block_k": 256, "fused_stages": 3, "gemm2_block_k": 512, "gemm2_persistent": false, "gemm2_stages": 1}
+          next: [P1 rewrite] 1 warpgroup per CTA; reference runs 2
+  11   --        66.9 us  D=0.411  numerics ok  {"fuse_gemm1": true, "fused_block_k": 256, "fused_stages": 3, "gemm2_block_k": 128, "gemm2_persistent": false, "gemm2_stages": 1}
+          next: [P1 rewrite] 1 warpgroup per CTA; reference runs 2
+
+best 60.0 us (1.30x reference), D=0.411, setting {"fuse_gemm1": true, "fused_block_k": 256, "fused_stages": 3, "gemm2_block_k": 512, "gemm2_persistent": false, "gemm2_stages": 1}
+did not reach the reference within its noise floor
+
+remaining differences with no knob to turn:
+  - P1 rewrite: 1 warpgroup per CTA; reference runs 2
+  - P2 investigate: TMA box rank differs
+  - P5 rewrite: FP flavor differs: cvt
+  - P5 rewrite: FP flavor differs: div
+  - P5 rewrite: FP flavor differs: ex2
+  - P5 investigate: Mainloop op order differs
+  - P5 rewrite: FP flavor differs: abs
+  - P5 rewrite: FP flavor differs: max
+  - P5 rewrite: FP flavor differs: min

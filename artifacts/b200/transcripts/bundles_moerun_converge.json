@@ -1,0 +1,293 @@
+{
+  "steps": [
+    {
+      "index": 0,
+      "setting": {
+        "gemm2_block_k": 128,
+        "gemm2_stages": 1,
+        "fused_block_k": 128,
+        "fused_stages": 2,
+        "gemm2_persistent": false,
+        "fuse_gemm1": true
+      },
+      "time": 71.03175,
+      "distance": 0.5071968778250612,
+      "numerics_pass": true,
+      "accepted": true,
+      "reason": "first passing candidate",
+      "fix": "[P1 rewrite] 1 warpgroup per CTA; reference runs 2",
+      "top_rows": [
+        "L0.warpgroups",
+        "L0.smem",
+        "L0.grid",
+        "L1.tma_dims"
+      ]
+    },
+    {
+      "index": 1,
+      "setting": {
+        "gemm2_block_k": 256,
+        "gemm2_stages": 1,
+        "fused_block_k": 128,
+        "fused_stages": 2,
+        "gemm2_persistent": false,
+        "fuse_gemm1": true
+      },
+      "time": 64.92695,
+      "distance": 0.5071968778250612,
+      "numerics_pass": true,
+      "accepted": true,
+      "reason": "faster than best by more than noise (1.0%)",
+      "fix": "[P1 rewrite] 1 warpgroup per CTA; reference runs 2",
+      "top_rows": [
+        "L0.warpgroups",
+        "L0.smem",
+        "L0.grid",
+        "L1.tma_dims"
+      ]
+    },
+    {
+      "index": 2,
+      "setting": {
+        "gemm2_block_k": 512,
+        "gemm2_stages": 1,
+        "fused_block_k": 128,
+        "fused_stages": 2,
+        "gemm2_persistent": false,
+        "fuse_gemm1": true
+      },
+      "time": 64.2096,
+      "distance": 0.5071968778250612,
+      "numerics_pass": true,
+      "accepted": true,
+      "reason": "faster than best by more than noise (1.0%)",
+      "fix": "[P1 rewrite] 1 warpgroup per CTA; reference runs 2",
+      "top_rows": [
+        "L0.warpgroups",
+        "L0.smem",
+        "L0.grid",
+        "L1.tma_dims"
+      ]
+    },
+    {
+      "index": 3,
+      "setting": {
+        "gemm2_block_k": 512,
+        "gemm2_stages": 2,
+        "fused_block_k": 128,
+        "fused_stages": 2,
+        "gemm2_persistent": false,
+        "fuse_gemm1": true
+      },
+      "time": 71.9757,
+      "distance": 0.5071968778250612,
+      "numerics_pass": true,
+      "accepted": false,
+      "reason": "slower",
+      "fix": "[P1 rewrite] 1 warpgroup per CTA; reference runs 2",
+      "top_rows": [
+        "L0.warpgroups",
+        "L0.smem",
+        "L0.grid",
+        "L1.tma_dims"
+      ]
+    },
+    {
+      "index": 4,
+      "setting": {
+        "gemm2_block_k": 512,
+        "gemm2_stages": 3,
+        "fused_block_k": 128,
+        "fused_stages": 2,
+        "gemm2_persistent": false,
+        "fuse_gemm1": true
+      },
+      "time": Infinity,
+      "distance": NaN,
+      "numerics_pass": false,
+      "accepted": false,
+      "reason": "capture failed: Command '['/home/ubuntu/venv-jax/bin/python', '-m', 'mosaicist.cli', 'capture', 'cand_pallas_moe', '--compiler', 'pallas",
+      "fix": null,
+      "top_rows": []
+    },
+    {
+      "index": 5,
+      "setting": {
+        "gemm2_block_k": 512,
+        "gemm2_stages": 1,
+        "fused_block_k": 256,
+        "fused_stages": 2,
+        "gemm2_persistent": false,
+        "fuse_gemm1": true
+      },
+      "time": 62.321450000000006,
+      "distance": 0.41059907834101383,
+      "numerics_pass": true,
+      "accepted": true,
+      "reason": "faster than best by more than noise (1.0%)",
+      "fix": "[P1 rewrite] 1 warpgroup per CTA; reference runs 2",
+      "top_rows": [
+        "L0.warpgroups",
+        "L0.smem",
+        "L0.grid",
+        "L1.tma_dims"
+      ]
+    },
+    {
+      "index": 6,
+      "setting": {
+        "gemm2_block_k": 128,
+        "gemm2_stages": 1,
+        "fused_block_k": 256,
+        "fused_stages": 2,
+        "gemm2_persistent": false,
+        "fuse_gemm1": true
+      },
+      "time": 68.9673,
+      "distance": 0.41059907834101383,
+      "numerics_pass": true,
+      "accepted": false,
+      "reason": "slower",
+      "fix": "[P1 rewrite] 1 warpgroup per CTA; reference runs 2",
+      "top_rows": [
+        "L0.warpgroups",
+        "L0.smem",
+        "L0.grid",
+        "L1.tma_dims"
+      ]
+    },
+    {
+      "index": 7,
+      "setting": {
+        "gemm2_block_k": 256,
+        "gemm2_stages": 1,
+        "fused_block_k": 256,
+        "fused_stages": 2,
+        "gemm2_persistent": false,
+        "fuse_gemm1": true
+      },
+      "time": 63.9216,
+      "distance": 0.41059907834101383,
+      "numerics_pass": true,
+      "accepted": false,
+      "reason": "slower",
+      "fix": "[P1 rewrite] 1 warpgroup per CTA; reference runs 2",
+      "top_rows": [
+        "L0.warpgroups",
+        "L0.smem",
+        "L0.grid",
+        "L1.tma_dims"
+      ]
+    },
+    {
+      "index": 8,
+      "setting": {
+        "gemm2_block_k": 512,
+        "gemm2_stages": 2,
+        "fused_block_k": 256,
+        "fused_stages": 2,
+        "gemm2_persistent": false,
+        "fuse_gemm1": true
+      },
+      "time": 68.59085,
+      "distance": 0.41059907834101383,
+      "numerics_pass": true,
+      "accepted": false,
+      "reason": "slower",
+      "fix": "[P1 rewrite] 1 warpgroup per CTA; reference runs 2",
+      "top_rows": [
+        "L0.warpgroups",
+        "L0.smem",
+        "L0.grid",
+        "L1.tma_dims"
+      ]
+    },
+    {
+      "index": 9,
+      "setting": {
+        "gemm2_block_k": 512,
+        "gemm2_stages": 3,
+        "fused_block_k": 256,
+        "fused_stages": 2,
+        "gemm2_persistent": false,
+        "fuse_gemm1": true
+      },
+      "time": Infinity,
+      "distance": NaN,
+      "numerics_pass": false,
+      "accepted": false,
+      "reason": "capture failed: Command '['/home/ubuntu/venv-jax/bin/python', '-m', 'mosaicist.cli', 'capture', 'cand_pallas_moe', '--compiler', 'pallas",
+      "fix": null,
+      "top_rows": []
+    },
+    {
+      "index": 10,
+      "setting": {
+        "gemm2_block_k": 512,
+        "gemm2_stages": 1,
+        "fused_block_k": 256,
+        "fused_stages": 3,
+        "gemm2_persistent": false,
+        "fuse_gemm1": true
+      },
+      "time": 59.97405,
+      "distance": 0.41059907834101383,
+      "numerics_pass": true,
+      "accepted": true,
+      "reason": "faster than best by more than noise (1.0%)",
+      "fix": "[P1 rewrite] 1 warpgroup per CTA; reference runs 2",
+      "top_rows": [
+        "L0.warpgroups",
+        "L0.smem",
+        "L0.grid",
+        "L1.tma_dims"
+      ]
+    },
+    {
+      "index": 11,
+      "setting": {
+        "gemm2_block_k": 128,
+        "gemm2_stages": 1,
+        "fused_block_k": 256,
+        "fused_stages": 3,
+        "gemm2_persistent": false,
+        "fuse_gemm1": true
+      },
+      "time": 66.89765,
+      "distance": 0.41059907834101383,
+      "numerics_pass": true,
+      "accepted": false,
+      "reason": "slower",
+      "fix": "[P1 rewrite] 1 warpgroup per CTA; reference runs 2",
+      "top_rows": [
+        "L0.warpgroups",
+        "L0.smem",
+        "L0.grid",
+        "L1.tma_dims"
+      ]
+    }
+  ],
+  "best": {
+    "id": "{\"fuse_gemm1\": true, \"fused_block_k\": 256, \"fused_stages\": 3, \"gemm2_block_k\": 512, \"gemm2_persistent\": false, \"gemm2_stages\": 1}",
+    "time": 59.97405,
+    "distance": 0.41059907834101383,
+    "numerics_pass": true,
+    "parent": null,
+    "fix": "[P1 rewrite] 1 warpgroup per CTA; reference runs 2"
+  },
+  "reference_time": 46.03876666666667,
+  "noise": 0.010000000000000002,
+  "converged": false,
+  "remaining": [
+    "P1 rewrite: 1 warpgroup per CTA; reference runs 2",
+    "P2 investigate: TMA box rank differs",
+    "P5 rewrite: FP flavor differs: cvt",
+    "P5 rewrite: FP flavor differs: div",
+    "P5 rewrite: FP flavor differs: ex2",
+    "P5 investigate: Mainloop op order differs",
+    "P5 rewrite: FP flavor differs: abs",
+    "P5 rewrite: FP flavor differs: max",
+    "P5 rewrite: FP flavor differs: min"
+  ],
+  "rewrites": []
+}

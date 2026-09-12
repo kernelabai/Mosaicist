@@ -1,0 +1,77 @@
+{
+  "steps": [
+    {
+      "index": 0,
+      "setting": {
+        "block_k": 128,
+        "stages": 1,
+        "warp_split": false,
+        "collective": false
+      },
+      "time": 28.624000000000002,
+      "distance": 0.16842226842226843,
+      "numerics_pass": true,
+      "accepted": true,
+      "reason": "first passing candidate",
+      "fix": "[P1 knob] Shared-memory footprint differs",
+      "top_rows": [
+        "L0.smem",
+        "L1.mma_per_stage[-1]",
+        "L3.order[-1]"
+      ]
+    },
+    {
+      "index": 1,
+      "setting": {
+        "block_k": 256,
+        "stages": 1,
+        "warp_split": false,
+        "collective": false
+      },
+      "time": 24.336,
+      "distance": 0.1648186648186648,
+      "numerics_pass": true,
+      "accepted": true,
+      "reason": "faster than best by more than noise (5.0%)",
+      "fix": "[P1 knob] Shared-memory footprint differs",
+      "top_rows": [
+        "L0.smem",
+        "L1.mma_per_stage[-1]",
+        "L3.order[-1]"
+      ]
+    },
+    {
+      "index": 2,
+      "setting": {
+        "block_k": 512,
+        "stages": 1,
+        "warp_split": false,
+        "collective": false
+      },
+      "time": 18.415999999999997,
+      "distance": 0.02882882882882883,
+      "numerics_pass": true,
+      "accepted": true,
+      "reason": "faster than best by more than noise (5.0%)",
+      "fix": "[P5 investigate] Kernel op order differs",
+      "top_rows": [
+        "L3.order[-1]"
+      ]
+    }
+  ],
+  "best": {
+    "id": "{\"block_k\": 512, \"collective\": false, \"stages\": 1, \"warp_split\": false}",
+    "time": 18.415999999999997,
+    "distance": 0.02882882882882883,
+    "numerics_pass": true,
+    "parent": null,
+    "fix": "[P5 investigate] Kernel op order differs"
+  },
+  "reference_time": 18.479999999999997,
+  "noise": 0.05,
+  "converged": true,
+  "remaining": [
+    "P5 investigate: Kernel op order differs"
+  ],
+  "rewrites": []
+}

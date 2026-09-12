@@ -1,0 +1,70 @@
+{
+  "name": "ref_flashinfer_gemm",
+  "arch": "sm_100a",
+  "operands": [
+    {
+      "name": "a",
+      "shape": [
+        8,
+        512,
+        2048
+      ],
+      "dtype": "float4_e2m1fn",
+      "axes": [
+        "l",
+        "m",
+        "k"
+      ]
+    },
+    {
+      "name": "b",
+      "shape": [
+        8,
+        2048,
+        2048
+      ],
+      "dtype": "float4_e2m1fn",
+      "axes": [
+        "l",
+        "n",
+        "k"
+      ]
+    }
+  ],
+  "out_shape": [
+    8,
+    512,
+    2048
+  ],
+  "out_dtype": "bfloat16",
+  "dims": {
+    "l": 8,
+    "m": 512,
+    "n": 2048,
+    "k": 2048
+  },
+  "tile": {
+    "m": 512,
+    "n": 2048
+  },
+  "grid": [
+    1,
+    1,
+    148
+  ],
+  "block": [
+    192,
+    1,
+    1
+  ],
+  "cluster": [
+    1,
+    1,
+    1
+  ],
+  "mma": "tcgen05",
+  "mma_kind": "mxf4nvf4",
+  "acc_dtype": "float32",
+  "stages": 9,
+  "deferred": []
+}

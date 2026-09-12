@@ -5,6 +5,10 @@ The masked MoE path from
 ported to Pallas Mosaic GPU on **sm_100a**, keeping NVFP4 end to end: e2m1 data, e4m3
 scales per 16 elements, applied inside `tcgen05.mma.kind.block_scale`.
 
+## TL;DR: unable to match the performance of CuTeDSL in Pallas+Mosaic GPU
+The reference kernel's configuration isn't transferable without its thread layout,
+and its thread layout is precisely what Pallas can't express.
+
 ## Status: verified on a B200
 
 Everything here runs and is checked against `nvfp4.py`'s fp32 reference on an NVIDIA

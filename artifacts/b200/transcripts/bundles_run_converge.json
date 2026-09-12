@@ -1,0 +1,183 @@
+{
+  "steps": [
+    {
+      "index": 0,
+      "setting": {
+        "block_k": 128,
+        "stages": 1,
+        "warp_split": false,
+        "collective": false
+      },
+      "time": 28.576,
+      "distance": 0.3454479946283225,
+      "numerics_pass": true,
+      "accepted": true,
+      "reason": "first passing candidate",
+      "fix": "[P1 rewrite] 1 warpgroup per CTA; reference runs 2",
+      "top_rows": [
+        "L0.warpgroups",
+        "L0.smem",
+        "L0.grid",
+        "L1.tma_dims"
+      ]
+    },
+    {
+      "index": 1,
+      "setting": {
+        "block_k": 256,
+        "stages": 1,
+        "warp_split": false,
+        "collective": false
+      },
+      "time": 22.144,
+      "distance": 0.34321252517973827,
+      "numerics_pass": true,
+      "accepted": true,
+      "reason": "faster than best by more than noise (5.0%)",
+      "fix": "[P1 rewrite] 1 warpgroup per CTA; reference runs 2",
+      "top_rows": [
+        "L0.warpgroups",
+        "L0.smem",
+        "L0.grid",
+        "L1.tma_dims"
+      ]
+    },
+    {
+      "index": 2,
+      "setting": {
+        "block_k": 512,
+        "stages": 1,
+        "warp_split": false,
+        "collective": false
+      },
+      "time": 18.415999999999997,
+      "distance": 0.315972915972916,
+      "numerics_pass": true,
+      "accepted": true,
+      "reason": "faster than best by more than noise (5.0%)",
+      "fix": "[P1 rewrite] 1 warpgroup per CTA; reference runs 2",
+      "top_rows": [
+        "L0.warpgroups",
+        "L0.smem",
+        "L0.grid",
+        "L1.tma_dims"
+      ]
+    },
+    {
+      "index": 3,
+      "setting": {
+        "block_k": 512,
+        "stages": 2,
+        "warp_split": false,
+        "collective": false
+      },
+      "time": 26.832,
+      "distance": 0.31601431355529713,
+      "numerics_pass": true,
+      "accepted": false,
+      "reason": "slower",
+      "fix": "[P1 rewrite] 1 warpgroup per CTA; reference runs 2",
+      "top_rows": [
+        "L0.warpgroups",
+        "L0.grid",
+        "L1.tma_dims",
+        "L1.stmatrix"
+      ]
+    },
+    {
+      "index": 4,
+      "setting": {
+        "block_k": 512,
+        "stages": 3,
+        "warp_split": false,
+        "collective": false
+      },
+      "time": Infinity,
+      "distance": NaN,
+      "numerics_pass": false,
+      "accepted": false,
+      "reason": "capture failed: Command '['/home/ubuntu/venv-jax/bin/python', '-m', 'mosaicist.cli', 'capture', 'cand_pallas_gemm', '--compiler', 'palla",
+      "fix": null,
+      "top_rows": []
+    },
+    {
+      "index": 5,
+      "setting": {
+        "block_k": 512,
+        "stages": 4,
+        "warp_split": false,
+        "collective": false
+      },
+      "time": Infinity,
+      "distance": NaN,
+      "numerics_pass": false,
+      "accepted": false,
+      "reason": "capture failed: Command '['/home/ubuntu/venv-jax/bin/python', '-m', 'mosaicist.cli', 'capture', 'cand_pallas_gemm', '--compiler', 'palla",
+      "fix": null,
+      "top_rows": []
+    },
+    {
+      "index": 6,
+      "setting": {
+        "block_k": 512,
+        "stages": 1,
+        "warp_split": false,
+        "collective": true
+      },
+      "time": 22.688,
+      "distance": 0.4257672655213639,
+      "numerics_pass": true,
+      "accepted": false,
+      "reason": "slower",
+      "fix": "[P1 rewrite] 1 warpgroup per CTA; reference runs 2",
+      "top_rows": [
+        "L0.warpgroups",
+        "L0.cluster",
+        "L0.smem",
+        "L0.grid"
+      ]
+    },
+    {
+      "index": 7,
+      "setting": {
+        "block_k": 512,
+        "stages": 1,
+        "warp_split": true,
+        "collective": false
+      },
+      "time": 18.432,
+      "distance": 0.31624591624591625,
+      "numerics_pass": true,
+      "accepted": false,
+      "reason": "same speed, not closer",
+      "fix": "[P1 rewrite] 1 warpgroup per CTA; reference runs 2",
+      "top_rows": [
+        "L0.warpgroups",
+        "L0.smem",
+        "L0.grid",
+        "L1.tma_dims"
+      ]
+    }
+  ],
+  "best": {
+    "id": "{\"block_k\": 512, \"collective\": false, \"stages\": 1, \"warp_split\": false}",
+    "time": 18.415999999999997,
+    "distance": 0.315972915972916,
+    "numerics_pass": true,
+    "parent": null,
+    "fix": "[P1 rewrite] 1 warpgroup per CTA; reference runs 2"
+  },
+  "reference_time": 13.36,
+  "noise": 0.05,
+  "converged": false,
+  "remaining": [
+    "P1 rewrite: 1 warpgroup per CTA; reference runs 2",
+    "P2 investigate: TMA box rank differs",
+    "P5 rewrite: stmatrix use differs",
+    "P5 investigate: Mainloop op order differs"
+  ],
+  "rewrites": [
+    "structural: collective -> True, named by collective",
+    "structural: warp_split -> True"
+  ]
+}
