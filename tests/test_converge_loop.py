@@ -229,3 +229,30 @@ def test_loop_asks_for_a_structural_step_once_the_knobs_are_spent(tmp_path):
     assert res.best is not None and res.best.time == 20.0
     assert res.rewrites and "warp_split" in res.rewrites[0]
     assert "structural steps taken" in res.summary()
+
+
+def test_noise_floor_comes_from_the_reference_when_there_are_enough_samples():
+    from mosaicist.converge.loop import _reference_noise
+
+    cfg = LoopConfig(noise_batches=4, default_noise=0.05)
+    steady = [100.0, 100.5, 99.5, 100.0] * 4
+    jittery = [80.0] * 4 + [120.0] * 4 + [100.0] * 4 + [100.0] * 4
+
+    assert _reference_noise(steady, cfg) < _reference_noise(jittery, cfg)
+    assert _reference_noise([100.0, 101.0], cfg) == 0.05, "too few samples: fall back"
+    assert _reference_noise([], cfg) == 0.05
+
+
+def test_measured_noise_decides_whether_a_candidate_counts_as_faster(tmp_path):
+    """A candidate inside the reference's own jitter must not be called an improvement."""
+    jittery = ([70.0] * 5 + [130.0] * 5) * 2  # a very noisy reference, median 100
+    ref = _bundle(tmp_path, "ref", jittery)
+
+    def runner(setting, outdir):
+        return _bundle(tmp_path, Path(outdir).name, [95.0] * 8)
+
+    res = converge(ref, "unused:build", tmp_path / "run6",
+                   space=KnobSpace({"stages": [1, 2]}),
+                   config=LoopConfig(max_steps=3, gate_numerics=False), runner=runner)
+    assert res.noise > 0.05, "the reference's spread should be measured, not assumed"
+    assert res.converged, "95 us is within the jitter of a 100 us reference"

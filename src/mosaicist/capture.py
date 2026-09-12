@@ -15,7 +15,13 @@ A capture module looks like this::
         return matmul, (a, b)
 
 `build()` returns `(callable, args)`. The callable is invoked as `callable(*args)`; its
-result is what gets saved for the numerics gate.
+result is what gets saved for the numerics gate. A module may also expose `reference()`,
+a float64 oracle over the same inputs, which is what makes the gate usable: it compares
+the candidate and the reference against a third opinion, so both must see identical
+data. Generate the inputs deterministically.
+
+SASS collection needs `nvdisasm` (Mosaic) or `cuobjdump` (CuTeDSL) on PATH; without them
+the bundle simply has no SASS and the L5 rows stay empty.
 """
 
 from __future__ import annotations

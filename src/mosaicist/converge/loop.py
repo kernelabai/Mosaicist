@@ -33,8 +33,10 @@ class LoopConfig:
     max_steps: int = 12
     reps: int = 30
     python: str | None = None
-    #: fallback noise floor when the reference has too few A/A runs to measure one
+    #: fallback noise floor when the reference has too few samples to measure one
     default_noise: float = 0.05
+    #: how many batches to split the reference's samples into when measuring it
+    noise_batches: int = 4
     gate_numerics: bool = True
 
 
@@ -99,6 +101,21 @@ class Result:
         return p
 
 
+def _reference_noise(samples: list[float], cfg: LoopConfig) -> float:
+    """The reference's own run-to-run spread, which is what "equal" has to mean.
+
+    The design measures this with repeated A/A runs; a single capture's samples split
+    into batches is the same statistic from data already in hand, and it beats asserting
+    a constant. Too few samples to split and we fall back to the configured default.
+    """
+    n = len(samples or [])
+    if n < 2 * cfg.noise_batches:
+        return cfg.default_noise
+    size = n // cfg.noise_batches
+    batches = [samples[i * size:(i + 1) * size] for i in range(cfg.noise_batches)]
+    return max(noise_floor(batches), cfg.default_noise * 0.2)
+
+
 #: A runner captures the candidate at one setting and returns its bundle.
 Runner = Callable[[Setting, Path], Bundle]
 
@@ -160,7 +177,7 @@ def converge(reference: Bundle, candidate_entry: str, outdir: str | Path,
     ref_fp = reference.fingerprint()
     ref_times = summarize(reference.timings) if reference.timings else None
     t_ref = ref_times.median if ref_times else float("nan")
-    noise = cfg.default_noise
+    noise = _reference_noise(reference.timings, cfg)
 
     structural = tuple(getattr(module, "STRUCTURAL", ()) or ()) if module else ()
     if rewriter is not None and hasattr(rewriter, "structural"):

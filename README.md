@@ -70,6 +70,24 @@ In twelve steps it reaches the configuration a long manual search had arrived at
 reports what is left as named gaps. Knobs are tried before structural changes, and a
 setting that cannot be built is recorded and stepped over rather than ending the run.
 
+The cross-framework run above has the numerics gate off, because a torch reference and a
+JAX candidate generate their own inputs and the gate needs both to see the same data.
+Converging one Pallas kernel onto another does share inputs, so there the gate runs:
+
+```
+reference 18.5 us, noise floor 5.0%
+   0 accept      28.6 us  D=0.168  numerics ok  {"block_k": 128, "stages": 1, ...}
+          next: [P1 knob] Shared-memory footprint differs
+   1 accept      24.3 us  D=0.165  numerics ok  {"block_k": 256, "stages": 1, ...}
+   2 accept      18.4 us  D=0.029  numerics ok  {"block_k": 512, "stages": 1, ...}
+best 18.4 us (1.00x reference), D=0.029
+converged
+```
+
+Three steps from a naive setting to parity, with every candidate checked against a
+float64 oracle, and the fingerprint distance falling 0.168 -> 0.029 as the runtime
+converges — which is the behaviour §1.5 predicts and the reason D is worth computing.
+
 Capturing the reference also showed something its PTX alone did not: it launches
 `grid=[1,1,148]`, one block per SM with 226 KB of shared memory. It is persistent, and
 the port is not.

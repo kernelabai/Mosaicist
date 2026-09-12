@@ -35,16 +35,38 @@ STRUCTURAL = ("warp_split", "collective")
 DEFAULTS = {"block_k": 128, "stages": 1, "warp_split": False, "collective": False}
 
 
-def build():
-    k = from_env(DEFAULTS)
-    cfg = GemmConfig(block_k=k["block_k"], stages=k["stages"], collective=k["collective"])
-    gemm = masked_grouped_gemm_w1 if k["warp_split"] else masked_grouped_gemm
+def _inputs():
+    """The problem, generated deterministically so every capture sees the same data.
 
+    That is what lets the numerics gate run: the gate compares a candidate's output to
+    the reference's, and it can only do that if both were given identical inputs.
+    """
     gs = jnp.full((L,), 64.0, jnp.float32)
     a_q, a_sf = quantize_nvfp4(
         jax.random.normal(jax.random.key(0), (L, M, K), jnp.float32), gs)
     b_q, b_sf = quantize_nvfp4(
         jax.random.normal(jax.random.key(1), (L, N, K), jnp.float32) * 0.05, gs)
+    return a_q, a_sf, b_q, b_sf
+
+
+def reference():
+    """float64 oracle: dequantize both operands and contract in double precision."""
+    import numpy as np
+
+    a_q, a_sf, b_q, b_sf = _inputs()
+    a = np.asarray(a_q, np.float64) * np.repeat(
+        np.asarray(a_sf, np.float64), 16, axis=-1)
+    b = np.asarray(b_q, np.float64) * np.repeat(
+        np.asarray(b_sf, np.float64), 16, axis=-1)
+    return np.einsum("lmk,lnk->lmn", a, b)
+
+
+def build():
+    k = from_env(DEFAULTS)
+    cfg = GemmConfig(block_k=k["block_k"], stages=k["stages"], collective=k["collective"])
+    gemm = masked_grouped_gemm_w1 if k["warp_split"] else masked_grouped_gemm
+
+    a_q, a_sf, b_q, b_sf = _inputs()
     asf, bsf = jax.vmap(to_mma_scale_layout)(a_sf), jax.vmap(to_mma_scale_layout)(b_sf)
     alpha = jnp.ones((L,), jnp.float32)
     masked_m = jnp.full((L,), M, jnp.int32)
