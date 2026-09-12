@@ -18,6 +18,7 @@ import jax.numpy as jnp
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "src"))
 from mosaicist.bench.cupti_trace import KernelTrace  # noqa: E402
 
+from gemm1_silu_quantize import FusedConfig, gemm1_silu_quantize  # noqa: E402
 from masked_gemm import GemmConfig  # noqa: E402
 from masked_gemm_ws import masked_grouped_gemm_w1 as masked_grouped_gemm  # noqa: E402
 from moe import make_moe_inputs, moe_masked  # noqa: E402
@@ -63,12 +64,17 @@ def main():
 
     jq, jsq = jax.jit(quantize_nvfp4_pallas), jax.jit(silu_mul_quantize_nvfp4_pallas)
     jg = jax.jit(masked_grouped_gemm, static_argnums=6)
+    jfu = jax.jit(gemm1_silu_quantize, static_argnums=7)
     jr = jax.jit(_retile)
     a_q, a_sf = jax.block_until_ready(jq(kw["hidden"], gs, mask))
     g1_alpha = kw["w1_alpha"] / (gs * kw["w1_gs"])
+    # retile once, outside the timed regions: leaving it inside the gemm lambdas both
+    # inflated their times and double-counted it against its own row
+    a_sf_t = jax.block_until_ready(jr(a_sf))
     gateup = jax.block_until_ready(
-        jg(a_q, jr(a_sf), kw["w1_q"], kw["w1_sf"], g1_alpha, mask, GemmConfig()))
+        jg(a_q, a_sf_t, kw["w1_q"], kw["w1_sf"], g1_alpha, mask, GemmConfig()))
     d_q, d_sf = jax.block_until_ready(jsq(gateup, kw["a2_global_scale"], mask))
+    d_sf_t = jax.block_until_ready(jr(d_sf))
     g2_alpha = kw["w2_alpha"] / (kw["a2_global_scale"] * kw["w2_gs"])
 
     flops1, flops2 = 2 * l * m * (2 * n) * k, 2 * l * m * k * n
@@ -81,10 +87,13 @@ def main():
         ("quantize hidden", lambda: jq(kw["hidden"], gs, mask), 0),
         ("  + retile scales", lambda: jr(a_sf), 0),
         ("gemm1 (l,m,k)x(l,2n,k)",
-         lambda: jg(a_q, jr(a_sf), kw["w1_q"], kw["w1_sf"], g1_alpha, mask, GemmConfig()), flops1),
+         lambda: jg(a_q, a_sf_t, kw["w1_q"], kw["w1_sf"], g1_alpha, mask, GemmConfig()), flops1),
         ("silu_and_mul + quantize", lambda: jsq(gateup, kw["a2_global_scale"], mask), 0),
+        ("[fused gemm1+silu+quant]",
+         lambda: jfu(a_q, a_sf_t, kw["w1_q"], kw["w1_sf"], g1_alpha,
+                     kw["a2_global_scale"], mask, FusedConfig()), flops1),
         ("gemm2 (l,m,n)x(l,k,n)",
-         lambda: jg(d_q, jr(d_sf), kw["w2_q"], kw["w2_sf"], g2_alpha, mask, GemmConfig()), flops2),
+         lambda: jg(d_q, d_sf_t, kw["w2_q"], kw["w2_sf"], g2_alpha, mask, GemmConfig()), flops2),
     ]:
         us = sum(device_us(fn, reps=args.reps).values())
         total += us

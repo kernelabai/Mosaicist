@@ -40,16 +40,19 @@ reference (it needs its own venv — torch, flashinfer, nvidia-cutlass-dsl).
 
 | stage | FlashInfer CuTeDSL | this port | gap |
 |---|---:|---:|---:|
-| quantize hidden | 10.9 µs | 12.4 µs (incl. retile) | 1.14× |
-| gemm1 `(l,m,k)×(l,2n,k)` | 13.4 µs · 2572 TFLOP/s | 20.7 µs · 1660 | 1.54× |
-| silu_and_mul + quantize | 8.7 µs | 17.0 µs | 1.95× |
-| gemm2 `(l,m,n)×(l,k,n)` | 9.4 µs · 1821 TFLOP/s | 15.1 µs · 1136 | 1.61× |
-| **end to end** | **46.0 µs** | **83.5 µs** | **1.82×** |
+| quantize hidden (+ scale retile) | 10.9 µs | 13.0 µs | 1.19× |
+| gemm1 + silu_and_mul + quantize | 13.4 + 8.7 = 22.1 µs | 34.7 µs (one fused kernel) | 1.57× |
+| gemm2 `(l,m,n)×(l,k,n)` | 9.4 µs · 1821 TFLOP/s | 12.9 µs · 1327 | 1.37× |
+| **end to end** | **46.0 µs** | **65.3 µs** | **1.42×** |
 | dense bf16 `jnp.einsum` baseline | 62.6 µs | | |
 
-**The port runs at 55% of the reference.** The reference beats the dense bf16 baseline
-by 1.36×; this port is still 0.75× it, so the baseline was the flattering comparison and
-the CuTeDSL kernel is the real bar.
+**The port runs at 70% of the reference**, up from 55%, and is now level with the dense
+bf16 baseline (0.96×) which it previously lost to.
+
+Measured in isolation the GEMMs are closer than the table suggests -- gemm1 alone is
+18.3 µs at 1880 TFLOP/s and gemm2 12.9 at 1327. An earlier version of this table read
+20.7 µs for gemm1 because the benchmark had the scale retile inside the timed region
+*and* counted it as its own row.
 
 The gap is structural, and the three causes are visible in
 `flashinfer/gemm/kernels/grouped_gemm_masked_blackwell.py`:
@@ -67,15 +70,25 @@ in a docstring, not what runs. The PTX says `cta_group::1` and `cluster [1,1,1]`
 shape the reference is **not** collective, which is consistent with the collective
 experiment below losing.
 
-Optimization so far took the port from 120.4 µs to 83.5 µs (1.44×), every step verified
+Optimization took the port from 120.4 µs to 65.3 µs (1.84×), every step verified
 bit-exact:
 
 | change | effect |
 |---|---|
-| `exp2` instead of `jax.nn.sigmoid` | 42.1 → 27.1 µs on the fused kernel |
+| `exp2` instead of `jax.nn.sigmoid` | 42.1 → 27.1 µs on the activation kernel |
 | `approx_math=True` | 26.5 → 16.9 µs on the same kernel |
 | `SUB_K=64` sub-tiles for the one-hot expansion | 14.2 → 10.3 µs on plain quantize |
-| shape-adaptive `block_k` / `stages` | gemm1 27.2 → 20.7, gemm2 18.5 → 15.1 |
+| shape-adaptive `block_k` / `stages` | gemm1 27.2 → 18.3, gemm2 18.5 → 12.9 |
+| warp split inside one warpgroup | gemm1 1855 → 1910 TFLOP/s |
+| **fusing GEMM1 + silu_and_mul + quantize** | **end to end 83.5 → 65.3 µs** |
+
+That last row is the one worth dwelling on. Timed against each other as standalone
+kernels, the fused version beats the two it replaces by 2% -- 34.3 µs against 35.0 --
+and on that evidence it looks not worth the complexity. End to end it is worth 22%.
+The difference is the `(l, m, 2n)` bf16 intermediate: 16.8 MB that has to be allocated,
+written, read back and handed between kernels, and none of that shows up when you time
+the two kernels back to back. It was most of the gap between this benchmark's
+"sum of stages" and its end-to-end row, which is why that gap was worth chasing.
 
 Optimization took it from 120.4 µs to 83.5 µs (1.44×), every step verified bit-exact:
 
@@ -103,7 +116,8 @@ these GEMMs reach 1660 TFLOP/s where the Hopper analog reaches 376.
 |---|---|
 | `nvfp4.py` | NVFP4 semantics, an fp32 reference for every stage, and the MMA scale tiling |
 | `masked_gemm.py` | the block-scaled masked grouped GEMM (`tcgen05_mma` with `a_scale`/`b_scale`) |
-| `masked_gemm_ws.py` | warp-specialized + persistent variant of the same GEMM (slower; see below) |
+| `masked_gemm_ws.py` | `masked_grouped_gemm_w1` (one-warpgroup warp split, **used**) and a two-warpgroup persistent variant (slower) |
+| `gemm1_silu_quantize.py` | GEMM1 fused with silu_and_mul and the quantize (**used**) |
 | `quantize_kernels.py` | the two quantize kernels |
 | `moe.py` | the end-to-end path, plus `make_moe_inputs` |
 | `test_nvfp4.py` | reference + scale-layout tests; runs anywhere |
@@ -279,15 +293,20 @@ The order below was revised after measuring: three structural GEMM optimizations
 implemented and all three were slower, so the remaining value is in the quantize path,
 not the GEMM.
 
-1. **`silu_and_mul + quantize` is a separate launch** — 17.0 µs against the reference's
-   8.7, the largest single stage gap. It writes 16.8 MB of bf16 and reads it straight
-   back; with all arithmetic ablated it still costs 11.9 µs, so that round trip is most
-   of it. It belongs in GEMM1's epilogue. The obstacle is that silu needs `gate[j]` and
-   `up[j]`, which sit `n` apart, so a GEMM1 block would have to compute two accumulators
-   (columns `j` and `j + n`) instead of one.
-2. **Warp specialization and 2-CTA collective are implemented but off**
-   (`masked_gemm_ws.py`, `GemmConfig(collective=True)`), both measured slower — see
-   above. Combining them is the untried configuration.
+1. **The fused kernel carries three operand streams per stage** (A, gate-B, up-B) where
+   the plain GEMM carries two, so fewer stages and blocks fit and its GEMM half runs
+   slower than `masked_gemm` would. That is why fusing wins 22% end to end but only 2%
+   against the two kernels it replaces. Recovering the difference means either a wider
+   activation tile without a fourth accumulator, or B tiles shared between the two
+   passes.
+2. **The scale retile is still a separate pass** (2.5 µs plus a launch, and it shows up
+   as `input_transpose_fusion` in the profile). Writing the MMA's scale tiling directly
+   from the quantize epilogue needs a scatter within the tile that is not expressible as
+   a vector store.
+3. **2-CTA collective is implemented but off** (`GemmConfig(collective=True)`), measured
+   slower, and the PTX shows the reference does not use it at this shape either.
+   Two-warpgroup specialization (`masked_gemm_ws.masked_grouped_gemm_ws`) is likewise
+   off and slower; the one-warpgroup warp split that *is* on came out of the PTX diff.
 3. **`silu_and_mul + quantize` is a separate launch** that writes 16.8 MB of bf16 and
    reads it straight back. With all arithmetic ablated away it still costs 11.9 µs, so
    that traffic is most of the 1.95× gap on the worst stage; it belongs in GEMM1's

@@ -25,9 +25,18 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 
+from gemm1_silu_quantize import FusedConfig, gemm1_silu_quantize
 from masked_gemm import GemmConfig
 from masked_gemm_ws import masked_grouped_gemm_w1 as masked_grouped_gemm
 from nvfp4 import to_mma_scale_layout
+
+FUSE_GEMM1 = True
+"""Run GEMM1, silu_and_mul and the second quantize as one kernel.
+
+Bit-exact against the unfused pair, and worth about 2% -- the 33.6 MB round trip it
+removes is mostly paid back by a GEMM that now needs three operand streams per stage
+instead of two, so fewer stages and blocks fit. It also drops a launch and the
+(l, m, 2n) bf16 intermediate."""
 from quantize_kernels import quantize_nvfp4_pallas, silu_mul_quantize_nvfp4_pallas
 
 _retile = jax.vmap(to_mma_scale_layout)  # over the expert axis
@@ -51,11 +60,16 @@ def moe_masked(
 ) -> jax.Array:
     """(l, m, k) bf16 in, (l, m, k) bf16 out. Rows >= masked_m[l] are undefined."""
     a_q, a_sf = quantize_nvfp4_pallas(hidden, input_global_scale, masked_m)
-    gateup = masked_grouped_gemm(
-        a_q, _retile(a_sf), w1_q, w1_sf,
-        w1_alpha / (input_global_scale * w1_gs), masked_m, gemm1_config,
-    )
-    d_q, d_sf = silu_mul_quantize_nvfp4_pallas(gateup, a2_global_scale, masked_m)
+    g1_alpha = w1_alpha / (input_global_scale * w1_gs)
+    if FUSE_GEMM1:
+        d_q, d_sf = gemm1_silu_quantize(
+            a_q, _retile(a_sf), w1_q, w1_sf, g1_alpha, a2_global_scale, masked_m,
+            FusedConfig(),
+        )
+    else:
+        gateup = masked_grouped_gemm(a_q, _retile(a_sf), w1_q, w1_sf, g1_alpha,
+                                     masked_m, gemm1_config)
+        d_q, d_sf = silu_mul_quantize_nvfp4_pallas(gateup, a2_global_scale, masked_m)
     return masked_grouped_gemm(
         d_q, _retile(d_sf), w2_q, w2_sf,
         w2_alpha / (a2_global_scale * w2_gs), masked_m, gemm2_config,
