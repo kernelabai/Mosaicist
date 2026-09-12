@@ -45,8 +45,13 @@ Reproduce with `experiments/hopper_gemm/{gen_inputs,ref_cutedsl,cand_pallas}.py`
 kernel on a B200. Capture both, then let the loop turn one knob at a time:
 
 ```bash
+# the stages separately ...
 mosaicist capture ref_flashinfer_gemm --compiler cutedsl --out bundles/ref --arch sm_100a
 mosaicist converge bundles/ref cand_pallas_gemm --out bundles/run --steps 12 --no-gate
+
+# ... or the whole pipeline, which also writes contract.json and report.md
+mosaicist port ref_flashinfer_gemm --ref-compiler cutedsl --spec spec_nvfp4_gemm.json \
+  --out port_run --candidate cand_pallas_gemm --ref-python ~/venv-fi/bin/python
 ```
 
 ```
@@ -88,9 +93,21 @@ Three steps from a naive setting to parity, with every candidate checked against
 float64 oracle, and the fingerprint distance falling 0.168 -> 0.029 as the runtime
 converges — which is the behaviour §1.5 predicts and the reason D is worth computing.
 
-Capturing the reference also showed something its PTX alone did not: it launches
-`grid=[1,1,148]`, one block per SM with 226 KB of shared memory. It is persistent, and
-the port is not.
+Capturing the reference also showed something its PTX alone did not. The extracted
+contract reads:
+
+```
+tile: {}
+deferred: ["persistent scheduling (grid [1, 1, 148] does not tile
+            {'l': 8, 'm': 512, 'n': 2048, 'k': 2048})",
+           "warp specialization (192 threads is not whole warpgroups)"]
+mma: tcgen05 mxf4nvf4 | grid [1, 1, 148] | block [192, 1, 1]
+```
+
+One block per SM with 226 KB of shared memory, and six warps rather than a whole number
+of warpgroups: the reference is persistent and warp-specialized, and the port is neither.
+The fingerprint's control-flow detectors miss both — it took the launch record from a
+capture to see them, which is the argument for capturing rather than reading PTX alone.
 
 ## Ports
 

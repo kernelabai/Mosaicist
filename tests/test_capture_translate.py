@@ -231,3 +231,29 @@ def test_spec_round_trips_and_report_names_the_gaps(tmp_path):
     assert "2.00x reference" in text
     assert "persistent scheduling" in text, "the report must say what v0 skipped"
     assert "## Gaps" in text and "1 warpgroup per CTA" in text
+
+
+PERSISTENT_PTX = PTX.replace(".entry k", ".entry persistent_k")
+
+
+def test_contract_does_not_invent_a_tile_from_a_persistent_launch(tmp_path):
+    """grid=[1,1,148] is one block per SM, not a 512x2048 tile."""
+    b = _fake_bundle(tmp_path, PERSISTENT_PTX, grid=(1, 1, 148))
+    b.launch.block = [192, 1, 1]
+    c = from_capture(b, dims={"m": 512, "n": 2048, "k": 2048},
+                     operands=[Operand("a", (512, 2048), "float4_e2m1fn")],
+                     out_shape=(512, 2048))
+    assert c.tile == {}, "no axis is plausibly tiled by that grid"
+    assert any("persistent" in d for d in c.deferred)
+    assert any("warp specialization" in d and "192" in d for d in c.deferred)
+
+
+def test_contract_still_infers_a_tile_from_a_tiled_launch(tmp_path):
+    b = _fake_bundle(tmp_path, PTX, grid=(4, 16, 1))
+    b.launch.block = [128, 1, 1]
+    c = from_capture(b, dims={"m": 512, "n": 2048, "k": 2048},
+                     operands=[Operand("a", (512, 2048), "float4_e2m1fn")],
+                     out_shape=(512, 2048))
+    assert c.tile == {"m": 128, "n": 128}
+    assert not any("persistent" in d for d in c.deferred)
+    assert not any("warp specialization" in d for d in c.deferred)

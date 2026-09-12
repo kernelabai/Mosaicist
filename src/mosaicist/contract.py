@@ -60,12 +60,20 @@ class Contract:
         return cls(**d)
 
 
-def _tile_from_launch(fp: Fingerprint, dims: dict[str, int]) -> dict[str, int]:
-    """Infer the output tile from the grid and the problem dims.
+#: An inferred tile larger than this is not a tile -- it means the grid does not tile
+#: that dimension, which is what a persistent launch looks like.
+MAX_PLAUSIBLE_TILE = 256
 
-    The grid is the tile count in each mapped dimension, so the tile is the dim divided
-    by it. Only dimensions the grid actually covers are inferred; K is a loop, not a
-    grid axis, and is left to the caller.
+
+def _tile_from_launch(fp: Fingerprint, dims: dict[str, int]) -> dict[str, int]:
+    """Infer the output tile from the grid and the problem dims, where the grid tiles.
+
+    For a tiled launch the grid extent is the tile count, so the tile is the dimension
+    divided by it. A persistent launch breaks that: its grid is the SM count regardless
+    of problem size, and dividing by it yields the whole dimension back. Rather than
+    record a fiction, axes the grid does not plausibly tile are left out -- the B200
+    reference measured here launches grid=[1,1,148] for a 512x2048 output, and the naive
+    reading called that a 512x2048 "tile".
     """
     grid = [g for g in (fp.skeleton.get("grid") or []) if g]
     tile: dict[str, int] = {}
@@ -75,8 +83,29 @@ def _tile_from_launch(fp: Fingerprint, dims: dict[str, int]) -> dict[str, int]:
     named = [k for k in ("m", "n", "l") if k in dims]
     for axis, extent in zip(named, grid):
         if extent and dims[axis] % extent == 0:
-            tile[axis] = dims[axis] // extent
+            candidate = dims[axis] // extent
+            if candidate <= MAX_PLAUSIBLE_TILE:
+                tile[axis] = candidate
     return tile
+
+
+def _launch_deferrals(fp: Fingerprint, dims: dict[str, int],
+                      tile: dict[str, int]) -> list[str]:
+    """What the launch record says the reference does that v0 will not.
+
+    The PTX alone hides both of these: the fingerprint's structural detectors read
+    control flow, while a capture carries the real grid and block, and those are what
+    give a persistent, warp-specialised kernel away.
+    """
+    out: list[str] = []
+    grid = [g for g in (fp.skeleton.get("grid") or []) if g]
+    threads = fp.skeleton.get("threads")
+
+    if grid and any(k in dims for k in ("m", "n", "l")) and not tile:
+        out.append(f"persistent scheduling (grid {grid} does not tile {dims})")
+    if threads and threads % 128:
+        out.append(f"warp specialization ({threads} threads is not whole warpgroups)")
+    return out
 
 
 def from_capture(bundle: Bundle, dims: dict[str, int], operands: list[Operand],
@@ -94,6 +123,7 @@ def from_capture(bundle: Bundle, dims: dict[str, int], operands: list[Operand],
         kind = key.split("kind::")[-1] if "kind::" in key else key.split(":")[-1]
         break
 
+    tile = _tile_from_launch(fp, dims)
     deferred = []
     if fp.structure.get("warp_specialized"):
         deferred.append("warp specialization")
@@ -101,6 +131,9 @@ def from_capture(bundle: Bundle, dims: dict[str, int], operands: list[Operand],
         deferred.append("persistent scheduling")
     if (fp.skeleton.get("cluster") or [1])[0] not in (0, 1, None):
         deferred.append("cluster / collective MMA")
+    for extra in _launch_deferrals(fp, dims, tile):
+        if not any(extra.split()[0] in d for d in deferred):
+            deferred.append(extra)
     mma_loops = fp.mma_loops()
 
     return Contract(
@@ -110,7 +143,7 @@ def from_capture(bundle: Bundle, dims: dict[str, int], operands: list[Operand],
         out_shape=tuple(out_shape),
         out_dtype=out_dtype,
         dims=dict(dims),
-        tile=_tile_from_launch(fp, dims),
+        tile=tile,
         grid=fp.skeleton.get("grid"),
         block=fp.skeleton.get("block"),
         cluster=fp.skeleton.get("cluster"),

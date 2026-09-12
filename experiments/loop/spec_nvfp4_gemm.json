@@ -1,0 +1,9 @@
+{
+  "dims": {"l": 8, "m": 512, "n": 2048, "k": 2048},
+  "operands": [
+    {"name": "a", "shape": [8, 512, 2048], "dtype": "float4_e2m1fn", "axes": ["l", "m", "k"]},
+    {"name": "b", "shape": [8, 2048, 2048], "dtype": "float4_e2m1fn", "axes": ["l", "n", "k"]}
+  ],
+  "out_shape": [8, 512, 2048],
+  "out_dtype": "bfloat16"
+}
