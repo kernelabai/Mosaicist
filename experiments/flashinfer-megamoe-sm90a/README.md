@@ -33,7 +33,7 @@ and the four-stage chain quantize → GEMM1 → silu_and_mul+quantize → GEMM2.
 | `moe.py` | the end-to-end path, plus `make_moe_inputs` |
 | `test_gemm.py` / `test_quantize.py` / `test_moe.py` | correctness against `quant.py` |
 | `bench_moe.py` | device-time benchmark vs a dense bf16 baseline |
-| `probe_layout.py` / `probe_ablate.py` / `probe_pipe.py` | the diagnostics that produced the findings below |
+| `probe_layout.py` / `probe_ablate.py` / `probe_pipe.py` / `probe_wg.py` | the diagnostics that produced the findings below |
 
 ## Correctness
 
@@ -41,9 +41,10 @@ All on an H100 PCIe. The GEMM and both quantization kernels are **bit-exact** ag
 the fp32 reference wherever the reference's own arithmetic is exact:
 
 ```
-test_gemm      7/7   5 bit-exact (incl. odd/single K-block tails), 2 random-float at 2.65e-03
-test_quantize  2/2   values=exact scales=exact for both kernels
-test_moe       3/3   max rel err 1.1e-02 - 1.6e-02, rms 2.6e-04 - 1.1e-03
+test_gemm      10/10  7 bit-exact (incl. odd/single K-block tails and both warpgroup
+                      counts), 3 random-float at 2.65e-03
+test_quantize   2/2   values=exact scales=exact for both kernels
+test_moe        3/3   max rel err 1.1e-02 - 1.6e-02, rms 2.6e-04 - 1.1e-03
 ```
 
 End-to-end is not bit-exact and cannot be: the intermediate quantization turns a 1-ulp
@@ -56,20 +57,23 @@ are the honest measure — ~3e-4 relative, i.e. the two implementations agree to
 
 | stage | µs | TFLOP/s |
 |---|---:|---:|
-| quantize hidden | 9.7 | |
-| gemm1 `(l,m,k)×(l,2n,k)` | 111.2 | 308.9 |
-| silu_and_mul + quantize | 16.2 | |
-| gemm2 `(l,m,n)×(l,k,n)` | 65.7 | 261.4 |
-| **moe_masked (end to end)** | **208.9** | **246.7** |
-| dense bf16 `jnp.einsum` baseline | 156.9 | 328.6 |
+| quantize hidden | 9.6 | |
+| gemm1 `(l,m,k)×(l,2n,k)` | 91.9 | 373.8 |
+| silu_and_mul + quantize | 16.0 | |
+| gemm2 `(l,m,n)×(l,k,n)` | 51.1 | 336.2 |
+| **moe_masked (end to end)** | **180.9** | **284.9** |
+| dense bf16 `jnp.einsum` baseline | 158.2 | 325.8 |
 
 Wall clock is useless at this size — every kernel here finishes well inside the ~1.5 ms
 host round-trip, so a `block_until_ready` loop reports the same 1.5 ms for all of them
 and even ranks the fused path faster than one of its own GEMMs. `bench_moe.py` uses
 CUPTI device time instead.
 
-**The fp8 path is currently 0.75× the dense bf16 baseline**, and the reason is measured,
-not guessed — see the accumulator finding below.
+**Both GEMMs now beat the dense bf16 baseline** (374 and 336 TFLOP/s against its 326),
+but the end-to-end path is 0.87× it, because the baseline does no quantization and this
+one spends 26 µs on it. That is a real cost of the format, not an inefficiency to tune
+away — though fusing the quantization into the previous GEMM's epilogue would remove
+most of it, and is the obvious next step.
 
 ## What the port turned up
 
@@ -103,6 +107,25 @@ activation into the quantize kernel, so the fp32 silu output is quantized direct
 `quant.py` originally rounded it to bf16 first, which made the Pallas kernel look wrong
 when it was the reference that was off.
 
+**Two resident blocks beat a second warpgroup, and are free.** The kernel's problem is
+that the CUDA-core rescale does not overlap the tensor-core MMA. The textbook fix is a
+second consumer warpgroup splitting the tile's N — that is implemented, correct, and
+*slower*. Two warpgroups sharing one ring of smem buffers must hand off through a
+`consumed` barrier before a stage can be refetched, and that handshake puts them back in
+lockstep; and doubling the threads per block at 255 registers each leaves room for only
+one block per SM. Shrinking `stages` instead until the block fits in half the SM's shared
+memory gets two blocks resident, and the hardware interleaves them at no cost:
+
+| config | smem | blocks/SM | TFLOP/s |
+|---|---:|---|---:|
+| `consumers=1, stages=3` (default) | 92 KB | 2 | **376** |
+| `consumers=1, stages=8` | 215 KB | 1 | 318 |
+| `consumers=2, stages=4` | 166 KB | 1 | 251 |
+| `consumers=2, stages=2` | 100 KB | 1 (register-bound) | 237 |
+
+Deeper pipelines are worth less than the second block, which is the opposite of the
+usual advice, and only shows up if you check occupancy rather than assume it.
+
 **Reading a wgmma accumulator drains every wgmma in flight, and that dominates.**
 Ablating the mainloop (`probe_ablate.py`, same shape as above):
 
@@ -123,11 +146,15 @@ spilling.
 
 ## Known limitations
 
-* **Single warpgroup.** 128 threads do the TMA issue, the MMA, and the rescale. The
-  remaining gap to the 630 TFLOP/s ceiling is exactly the rescale that a second
-  consumer warpgroup would hide, which is how DeepGEMM and cuBLAS close it. That is the
-  next thing worth doing, and it is a real rewrite: the two warpgroups need a
-  consumer-arrival barrier before a buffer can be refetched.
+* **No producer/consumer split.** The 128 threads of a block still do the TMA issue, the
+  MMA and the rescale themselves. A *dedicated producer* warpgroup that only issues TMAs
+  is the version worth trying next — unlike the second *consumer* warpgroup measured
+  above, it does not contend for registers with an accumulator, so it should not cost
+  the second resident block. The remaining gap to the 630 TFLOP/s pure-GEMM ceiling is
+  what it would be competing for.
+* The quantize kernels are separate launches; fusing them into the preceding GEMM's
+  epilogue would remove the 26 µs that currently keeps the end-to-end path below the
+  bf16 baseline even though both GEMMs are above it.
 * **Tile sizes below 128 need the `SF_ALIGN` padding** and were only tested at 64.
 * `tile_m` must divide `m` and `tile_n` must divide `n`; there is no epilogue predication
   for ragged tiles. Rows past `masked_m` inside a partially masked tile are computed and
