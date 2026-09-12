@@ -23,6 +23,17 @@ ok = True
 
 
 def case(label, l, m, n, k, cfg, seed=0):
+    """One config. Errors are reported and moved past: a config that cannot be built is
+    a result, not a reason to lose the other cases."""
+    global ok
+    try:
+        _case(label, l, m, n, k, cfg, seed)
+    except Exception as e:  # noqa: BLE001
+        ok = False
+        print(f"FAIL  {label:<38} {' '.join(str(e).split())[:80]}")
+
+
+def _case(label, l, m, n, k, cfg, seed=0):
     global ok
     key = jax.random.split(jax.random.key(seed), 3)
     gs = jnp.full((l,), 64.0, jnp.float32)
@@ -54,18 +65,22 @@ def case(label, l, m, n, k, cfg, seed=0):
           f"{'  TRIVIAL COMPARISON' if trivial else ''}")
 
 
-# k=4096 is 32 K blocks at block_k=128: the scale buffer is reused 32 times over
+# the scale TMEM buffer is reused once per K block, so many blocks is the stress case:
+# k=4096 is 32 of them at block_k=128, and 8 at block_k=512
 for label, k, cfg in [
-    ("k=512  (4 blocks, 4 stages)", 512, GemmConfig()),
-    ("k=4096 (32 blocks, 4 stages)", 4096, GemmConfig()),
-    ("k=4096 (32 blocks, 2 stages)", 4096, GemmConfig(stages=2)),
-    ("k=4096 (32 blocks, 8 stages)", 4096, GemmConfig(stages=8)),
-    ("k=4096, block_k=256 (16 blocks)", 4096, GemmConfig(block_k=256, stages=4)),
+    ("k=512,  block_k=256, 2 stages", 512, GemmConfig()),
+    ("k=4096, block_k=256, 2 stages", 4096, GemmConfig()),
+    ("k=4096, block_k=128, 4 stages", 4096, GemmConfig(block_k=128, stages=4)),
+    ("k=4096, block_k=128, 6 stages", 4096, GemmConfig(block_k=128, stages=6)),
+    ("k=4096, block_k=512, 1 stage", 4096, GemmConfig(block_k=512, stages=1)),
+    ("k=4096, tile_n=256", 4096, GemmConfig(tile_n=256)),
+    ("k=4096, auto block_k/stages", 4096, GemmConfig()),
 ]:
     case(label, 2, 256, 256, k, cfg)
 
-# repeat the deepest one across seeds: a race is not necessarily deterministic
+# repeat the deepest pipeline across seeds: a race is not necessarily deterministic
 for seed in range(1, 4):
-    case(f"k=4096, 8 stages, seed {seed}", 2, 256, 256, 4096, GemmConfig(stages=8), seed)
+    case(f"k=4096, block_k=128, 6 stages, seed {seed}", 2, 256, 256, 4096,
+         GemmConfig(block_k=128, stages=6), seed)
 
 sys.exit(0 if ok else 1)

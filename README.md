@@ -43,13 +43,13 @@ Reproduce with `experiments/hopper_gemm/{gen_inputs,ref_cutedsl,cand_pallas}.py`
 |---|---|---|
 | [`ports/hopper_mixed_dtype_grouped_gemm`](ports/hopper_mixed_dtype_grouped_gemm/README.md) | CUTLASS C++ → CuTeDSL | CUTLASS example 69 (fp8 x bf16 mixed-input grouped GEMM): bit-exact, at parity with C++ on the example's benchmark configurations; int4 variants not yet ported |
 | [`experiments/flashinfer-megamoe-sm90a`](experiments/flashinfer-megamoe-sm90a/README.md) | FlashInfer CuTeDSL → Pallas | FlashInfer/SGLang MegaMoE masked MoE, as a Hopper analog (fp8 with 128-element block scales instead of NVFP4): full path in Pallas, 12/12 tests, GEMM bit-exact, end to end agrees to bf16. 0.75x a dense bf16 baseline — the gap is measured and explained |
-| [`experiments/flashinfer-megamoe-sm100a`](experiments/flashinfer-megamoe-sm100a/README.md) | FlashInfer CuTeDSL → Pallas | the same MoE on Blackwell, keeping NVFP4 and `tcgen05.mma.kind.block_scale`. **Never run** — no sm_100a device. The reference arithmetic and scale tiling are tested, and every kernel is shown to build for sm_100a; the kernels' numerics are not verified |
+| [`experiments/flashinfer-megamoe-sm100a`](experiments/flashinfer-megamoe-sm100a/README.md) | FlashInfer CuTeDSL → Pallas | the same MoE on Blackwell, keeping NVFP4 and `tcgen05.mma.kind.block_scale`. **Verified on a B200**: GEMM bit-exact (21/21 tests), end to end at rms ~2e-3. 83.5 µs end to end with GEMMs at 1660/1136 TFLOP/s; 0.75x a dense bf16 baseline, the gap being quantization the baseline never pays |
 
 ## Known limitations
 
 - Diagnose's discrepancy rows are compiler-agnostic, but its suggested fixes name Pallas Mosaic GPU levers. Diffing two non-Pallas kernels (as the port below does) gives correct rows with inapplicable advice.
 - `L1.ldmatrix` and similar inventory rows are kernel-wide, so they do not say which loop (mainloop vs epilogue) the difference is in.
-- The convergence loop assumes both kernels run on the same GPU. The Blackwell port has no reference it can be diffed against on available hardware, so it was driven by Mosaic's lowering as the oracle instead — enough to find real constraints, not enough to prove correctness.
+- The convergence loop assumes both kernels run on the same GPU. The Blackwell port was written with no such hardware, using Mosaic's lowering as the only oracle; that was enough to find real constraints and the kernels needed no correctness fixes when a B200 arrived, but it could not have proven correctness on its own.
 
 ## Usage
 

@@ -1,47 +1,75 @@
 # FlashInfer MegaMoE → Pallas Mosaic GPU (Blackwell, NVFP4)
 
-The direct port of the masked MoE path in
+The masked MoE path from
 [`flashinfer_cutedsl_moe.py`](https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/layers/moe/flashinfer_cutedsl_moe.py)
-to Pallas Mosaic GPU on **sm_100a**, keeping NVFP4 end to end: e2m1 data, e4m3 scales
-per 16 elements, applied inside `tcgen05.mma.kind.block_scale`.
+ported to Pallas Mosaic GPU on **sm_100a**, keeping NVFP4 end to end: e2m1 data, e4m3
+scales per 16 elements, applied inside `tcgen05.mma.kind.block_scale`.
 
-## Status: not run
+## Status: verified on a B200
 
-**No sm_100a device was available, so none of these kernels have ever executed.** Treat
-every performance or correctness claim about the kernels as unproven. What *is* checked
-is stated precisely below — the point of this section is that you can tell the two
-apart.
+Everything here runs and is checked against `nvfp4.py`'s fp32 reference on an NVIDIA
+B200. The GEMM is **bit-exact**, including for random inputs — fp4 values and e4m3
+scales are all small integers times powers of two, so the products and their sums are
+exactly representable in the fp32 accumulator.
 
-| what | how | status |
-|---|---|---|
-| NVFP4 quantization arithmetic | `test_nvfp4.py`, plain JAX, any backend | **5/5 pass** on H100 |
-| the MMA scale tiling (`to_mma_scale_layout`) | `test_nvfp4.py`, checked element-by-element against the index mapping in the PTX spec, and for round-trip | **passes** |
-| every kernel builds for Blackwell | `check_lowering.py` — points Mosaic's arch detection at sm_100a and lowers | **4/4 lower**, tcgen05 emitted |
-| the lowering check can actually fail | negative control in the same file | **confirmed** — it trips `async_store_scales_smem_to_tmem`'s verifier |
-| the kernels compute the right answer | `test_kernels.py` | **never run** — skips on non-Blackwell |
-| performance | — | **unmeasured** |
+```
+test_nvfp4     5/5   NVFP4 arithmetic and the MMA scale tiling (runs on any backend)
+test_kernels   6/6   4 GEMM bit-exact, 2 end-to-end MoE at rms 1.4e-03 - 2.1e-03
+verify_b200   10/10  bit-exact across block_k 128-512, 1-6 stages, tile_n 128/256,
+                     up to 32 K blocks, and 4 seeds
+check_lowering 6/6   still builds for sm_100a from a non-Blackwell host
+```
 
-`check_lowering.py` is worth being precise about: it proves the kernels satisfy every
-shape, layout and dtype rule Mosaic and the MMA impose, which is most of what is hard
-about this port. It proves nothing about whether the arithmetic is right, whether the
-pipeline synchronises correctly, or whether it is fast.
+End-to-end is not bit-exact and cannot be: the intermediate quantization turns a 1-ulp
+difference in GEMM1's bf16 output into a whole e2m1 step, and e2m1 has three mantissa
+bits. The rms figures are the honest measure.
 
-A Hopper-runnable analog of the same algorithm — fp8 instead of fp4, scales applied to
-the accumulator instead of inside the MMA — is fully verified and benchmarked in
-[`../flashinfer-megamoe-sm90a`](../flashinfer-megamoe-sm90a). Where the two disagree
-about something testable, that one is the authority.
+The first run needed no correctness fixes. The one thing flagged in advance as most
+likely wrong — reusing a single scale TMEM buffer across K blocks, on the assumption
+that the tensor core's queue orders the copy behind the previous MMA — holds, and
+`verify_b200.py` stresses it to 32 reuses across stage counts and seeds.
+
+A Hopper analog of the same algorithm (fp8, scales applied to the accumulator) is in
+[`../flashinfer-megamoe-sm90a`](../flashinfer-megamoe-sm90a).
+
+## Performance
+
+`l=8, m=512, k=2048, n=1024` on a B200, device time from CUPTI activity records:
+
+| stage | µs | TFLOP/s |
+|---|---:|---:|
+| quantize hidden | 10.5 | |
+| ↳ retile scales | 1.9 | |
+| gemm1 `(l,m,k)×(l,2n,k)` | 20.7 | 1660 |
+| silu_and_mul + quantize | 17.0 | |
+| gemm2 `(l,m,n)×(l,k,n)` | 15.1 | 1136 |
+| **moe_masked (end to end)** | **83.5** | **618** |
+| dense bf16 `jnp.einsum` baseline | 62.6 | 823 |
+
+Optimization took it from 120.4 µs to 83.5 µs (1.44×), every step verified bit-exact:
+
+| change | effect |
+|---|---|
+| `exp2` instead of `jax.nn.sigmoid` | 42.1 → 27.1 µs on the fused kernel |
+| `approx_math=True` | 26.5 → 16.9 µs on the same kernel |
+| `SUB_K=64` sub-tiles for the one-hot expansion | 14.2 → 10.3 µs on plain quantize |
+| shape-adaptive `block_k` / `stages` | gemm1 27.2 → 20.7, gemm2 18.5 → 15.1 |
+
+**Still 0.75× the dense bf16 baseline.** The GEMMs are the fast part; the two quantize
+kernels cost 27.5 µs that the baseline never pays. Fusing `silu_and_mul + quantize` into
+GEMM1's epilogue would remove most of it — that kernel writes 16.8 MB of bf16 and reads
+it straight back — and is the clear next step.
 
 ## Why Blackwell changes the shape of the kernel
 
 The Hopper analog has no block-scaled MMA, so it reads the wgmma accumulator every K
-block, scales it by the outer product of the two scale vectors, and adds it to a
-register total. Ablation there showed that readout costs more than everything else in
-the kernel combined — a pure fp8 GEMM runs at 630 TFLOP/s and the same kernel with a
-per-K-block accumulator readout runs at 311, before any scaling arithmetic.
+block, rescales it, and adds to a register total. Ablation there showed that readout
+cost more than everything else combined: a pure fp8 GEMM ran at 630 TFLOP/s and the same
+kernel with a per-K-block readout at 311.
 
-`tcgen05.mma.kind.block_scale` removes that entirely: the scales are consumed by the
-MMA, the accumulator stays in TMEM across all of K, and the epilogue reads it once.
-That is the whole reason this port exists in fp4 form.
+`tcgen05.mma.kind.block_scale` removes it: the scales are consumed by the MMA, the
+accumulator stays in TMEM across all of K, and the epilogue reads it once. That is why
+these GEMMs reach 1660 TFLOP/s where the Hopper analog reaches 376.
 
 ## Files
 
@@ -52,58 +80,74 @@ That is the whole reason this port exists in fp4 form.
 | `quantize_kernels.py` | the two quantize kernels |
 | `moe.py` | the end-to-end path, plus `make_moe_inputs` |
 | `test_nvfp4.py` | reference + scale-layout tests; runs anywhere |
-| `check_lowering.py` | builds every kernel for sm_100a, with a negative control |
 | `test_kernels.py` | numerical tests; skips unless the device is sm_100a |
-| `probe_lower.py` | the bisect harness that produced the findings below |
+| `verify_b200.py` | non-triviality checks and the scale-buffer stress |
+| `check_lowering.py` | builds every kernel for sm_100a from any host, with a negative control |
+| `bench_moe.py` | device-time benchmark against a dense bf16 baseline |
+| `probe_*.py` | the diagnostics behind the findings below |
 
 ## What the port turned up
 
-Every one of these came from `probe_lower.py`, which bisects formulations by whether
-they survive Mosaic's lowering. Without a device, "does it build for sm_100a" was the
-only oracle available, and it was enough to find all of them.
+**Shared memory buys occupancy, not pipeline depth.** A block over half the SM's 232 KB
+runs alone, and that decides throughput more than anything else:
 
-**A scale tile must be at least 16 columns wide.** TMA requires 128 bits along the last
-dimension, and e4m3 scales are a byte each, so a tile of 8 scales is rejected. That sets
-`TILE_K = 256` in the quantize kernels — 256 elements of K give exactly 16 scales per
-row. The natural choice of 128 fails, and fails with a message about GMEM strides that
-points at the wrong operand.
+| config | smem | blocks/SM | TFLOP/s |
+|---|---:|---|---:|
+| `block_k=512, stages=1` | 107 KB | 2 | 1829 |
+| `block_k=256, stages=2` | 107 KB | 2 | 1745 |
+| `block_k=128, stages=4` | 107 KB | 2 | 1388 |
+| `block_k=128, stages=8` | 180 KB | 1 | 880 |
+| `tile_n=256, stages=2` | 176 KB | 1 | 1502 |
 
-**Mosaic GPU cannot reduce over a sub-row group of a register tile.** Reshaping a
-`(rows, K)` tile to `(rows, K // 16, 16)` and reducing the last axis has no layout
-solution — with a `layout_cast` to WGMMA, without one, with the cast on the result
-instead, or under `WG_STRIDED`. Since a 16-element block scale is exactly such a
-reduction, the kernel instead loops over 16 column slices in Python and does a plain 2D
-row reduction on each, which is the one form that works.
+At equal shared memory a wider K step beats more stages, and both beat a deeper pipeline
+that costs the second resident block. `GemmConfig` now derives both from `k`. This is the
+same lesson the Hopper analog learned independently, where shrinking `stages` to fit two
+blocks per SM beat adding a second consumer warpgroup.
 
-**The per-block results cannot be reassembled the obvious way.** Writing each block into
-a column slice of the output smem fails outright ("We cannot apply swizzle to
-non-contiguous refs"), and `jnp.concatenate` of the per-block arrays has no layout. What
-works is accumulating each block into a full-width array through a constant one-hot
-mask. It costs 16 full-tile multiply-adds per tile and about a megabyte of unrolled IR,
-which is the main thing a Blackwell run should be asked to justify.
+**`jax.nn.sigmoid` does not reach the hardware exponential.** It and `lax.logistic` both
+cost 42.1 µs on the fused kernel; `g / (1 + exp2(-g·log₂e))` costs 27.1 and is
+bit-identical. `exp` does not get there either — only the explicit `exp2` does.
 
-**Scales reach the MMA in a tiling, not row-major.** `async_copy_scales_to_tmem` wants
-smem shaped `(mn // 128, k_scales // 4, 32, 16)`; `nvfp4.to_mma_scale_layout` produces
-it, and `test_nvfp4.py` checks it element-by-element against the PTX spec's index
-mapping rather than trusting the reshape. The kernels take weight scales already tiled,
-and `moe.py` re-tiles the activation scales between stages.
+**`approx_math=True` is nearly free accuracy-wise and halves that kernel again**, to
+16.9 µs. The outputs are e2m1 and e4m3, so the extra error is orders of magnitude below
+a representable step, and both kernels stay bit-identical to the reference.
+
+**PTX told the wrong story here, and measurement corrected it.** The fused kernel's PTX
+has 448 `div.full.f32` against 256 `ex2.approx.f32`, which reads like division dominating.
+Ablation says otherwise: against an 11.9 µs base, the exponential costs 4.3 µs and the
+divides 5.3, with the rest interaction. `approx_math` never removed a single
+`div.full.f32` — it changed `ex2.approx.f32` to `ex2.approx.ftz.f` — and that is where
+its 9.6 µs came from.
+
+**A scale tile must be at least 16 columns wide.** TMA needs 128 bits along the last
+dimension and e4m3 scales are a byte each, so `TILE_K` is 256 (16 scales per row), not
+128. The failure mode points at the wrong operand: it reports GMEM strides.
+
+**Mosaic GPU cannot reduce over a sub-row group of a register tile.** Reshaping
+`(rows, K)` to `(rows, K/16, 16)` and reducing the last axis has no layout solution under
+any annotation tried, on hardware as on the lowering-only check. The kernels loop over
+column slices and do plain 2D row reductions instead, and reassemble through constant
+one-hot masks — a concatenate has no layout either, and a column-slice store into the
+swizzled output is rejected outright. That expansion costs `TILE_K × SUB_K / 16` per
+tile, so it is done per 64-column sub-tile rather than per 256-column tile. `SUB_K=32`
+sits exactly on TMA's 16-byte minimum row and produces wrong values, so 64 is the floor.
+
+**Scales reach the MMA in a tiling, not row-major**, and `test_nvfp4.py` checks
+`to_mma_scale_layout` element-by-element against the PTX spec's index mapping rather
+than trusting the reshape.
 
 ## Known limitations
 
-* **Unverified.** Listed first because it dominates everything else.
-* `tile_m` and `tile_n` are both fixed at 128. The MMA scale path is defined in terms of
-  128-row TMEM tiles and rejects more than two of them, so this is not a tuning knob.
-* Single warpgroup, no warp specialization, and no persistent scheduler — the structure
-  is the simplest one that can be correct, not the fastest. JAX's own
-  `blackwell_matmul_mgpu.py` splits the MMA and the epilogue across two warpgroups; that
-  is the first thing to do once the kernel is known to run.
+* The two quantize kernels are separate launches and account for 27.5 µs of the 83.5.
+  Fusing `silu_and_mul + quantize` into GEMM1's epilogue is the next real win.
+* `tile_m` is fixed at 128 by the MMA scale path; `tile_n` may be 128 or 256, and 256
+  measured slower because it costs the second resident block.
+* No warp specialization and no persistent scheduler. JAX's own
+  `blackwell_matmul_mgpu.py` splits the MMA and epilogue across two warpgroups.
 * The scale re-tiling between stages is a separate pass over a tensor 1/16 the size of
-  the data, rather than being fused into the quantize kernel's epilogue.
-* One scale buffer per operand is reused across K blocks, on the assumption that the
-  tensor core's queue orders the copy behind the previous MMA. This is the assumption
-  most likely to be wrong, and it is marked `ASSUMPTION` in `masked_gemm.py` along with
-  the fix (give the scale refs a `stages` leading dimension).
-* `m`, `n` must be multiples of 128 and `k` a multiple of `block_k`; there is no ragged
-  epilogue. As on Hopper, rows past `masked_m` inside a partially masked tile are
-  computed and written rather than zeroed, which is safe because every stage is
-  row-independent, but callers must not read above `masked_m`.
+  the data (1.9 µs) rather than being fused into the quantize epilogue; the tiled store
+  is a scatter within the tile, so it needs a different epilogue, not a tweak.
+* `m` and `n` must be multiples of 128 and `k` of `block_k`; there is no ragged epilogue.
+  Rows past `masked_m` inside a partially masked tile are computed and written rather
+  than zeroed — safe because every stage is row-independent, but callers must not read
+  above `masked_m`.

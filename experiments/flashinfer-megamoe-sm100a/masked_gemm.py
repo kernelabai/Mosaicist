@@ -37,17 +37,59 @@ from jax.experimental.pallas import mosaic_gpu as plgpu
 from nvfp4 import FP4_DTYPE, SF_DTYPE, SF_VEC_SIZE
 
 TMEM_ROWS = 128
-"""The MMA scale path is defined in terms of 128-row TMEM tiles, so `tile_m` and
-`tile_n` are both fixed at 128: `async_copy_scales_to_tmem` derives the smem shape as
-(mn // 128, k_scales // 4, 32, 16) and rejects anything above 2 tiles."""
+"""The MMA scale path is defined in terms of 128-row TMEM tiles.
+
+`tile_m` is fixed at 128 by it. `tile_n` may be 128 or 256: `async_copy_scales_to_tmem`
+derives the smem scale shape as (mn // 128, k_scales // 4, 32, 16) and rejects more than
+two mn-tiles, so 256 is the ceiling."""
 
 SF_TILE_K = 4 * SF_VEC_SIZE  # 64 elements of K per scale tile in the MMA layout
+
+SMEM_PER_SM = 227 * 1024
+"""B200 shared memory per SM. Half of it is the number that matters -- see GemmConfig."""
 
 
 @dataclasses.dataclass(frozen=True)
 class GemmConfig:
-    block_k: int = 128  # K elements per pipeline stage; must be a multiple of SF_TILE_K
-    stages: int = 4
+    """Defaults are the measured best on a B200 at l=8, m=512, k=n=2048 (gemm1's shape).
+
+    Shared memory here buys occupancy, not depth. A block costs
+    `stages * 144 * block_k + tile_m * tile_n * 2` bytes, and at more than half the SM's
+    232 KB it runs alone, which is what actually decides throughput:
+
+        block_k=512 stages=1   107 KB   2 blocks/SM   1829 TFLOP/s  (needs k % 512)
+        block_k=256 stages=2   107 KB   2 blocks/SM   1745          <- default
+        block_k=128 stages=4   107 KB   2 blocks/SM   1388
+        block_k=128 stages=8   180 KB   1 block/SM     880
+        tile_n=256  stages=2   176 KB   1 block/SM    1502
+
+    At equal shared memory a wider K step beats more stages, and both beat a deeper
+    pipeline that costs the second resident block. Leaving `block_k` and `stages` as
+    None applies exactly that rule to whatever k the call has -- take the widest K step
+    k allows, then as many stages as fit in half an SM -- which is why the two GEMMs in
+    a MoE layer, whose k differs, do not need to be configured by hand.
+    """
+    tile_n: int = 128  # 128 or 256; see TMEM_ROWS
+    block_k: int | None = None  # None: the largest of 512/256/128 that divides k
+    stages: int | None = None  # None: the most that still fit two blocks on an SM
+
+
+def _resolve(config: GemmConfig, k: int, tm: int, tn: int) -> tuple[int, int]:
+    """Fill in `block_k` / `stages`, following the table in GemmConfig.
+
+    Widest K step that divides k, then the deepest pipeline that still leaves the block
+    inside half an SM's shared memory so a second one can be resident alongside it.
+    """
+    bk = config.block_k
+    if bk is None:
+        bk = next((c for c in (512, 256, 128) if k % c == 0), None)
+        if bk is None:
+            raise ValueError(f"k={k} is not a multiple of 128; pass block_k explicitly")
+    stages = config.stages
+    if stages is None:
+        per_stage = tm * bk // 2 + tn * bk // 2 + 2 * (bk // SF_TILE_K) * 512
+        stages = max(1, (SMEM_PER_SM // 2 - tm * tn * 2) // per_stage)
+    return bk, stages
 
 
 def _fp4_transforms(minor_elems: int):
@@ -68,12 +110,19 @@ def masked_grouped_gemm(
 ) -> jax.Array:
     l, m, k = a_q.shape
     _, n, _ = b_q.shape
-    tm = tn = TMEM_ROWS
-    bk, stages = config.block_k, config.stages
+    tm, tn = TMEM_ROWS, config.tile_n
+    if tn not in (128, 256):
+        raise ValueError(f"tile_n must be 128 or 256, got {tn}")
+    n_tiles = tn // TMEM_ROWS  # mn-tiles of B scales this tile spans
+    bk, stages = _resolve(config, k, tm, tn)
     if m % tm or n % tn or k % bk:
         raise ValueError(f"({m}, {n}, {k}) must be tiled by ({tm}, {tn}, {bk})")
     if bk % SF_TILE_K:
         raise ValueError(f"block_k={bk} must be a multiple of {SF_TILE_K}")
+    smem = stages * (tm * bk // 2 + tn * bk // 2 + 2 * (bk // SF_TILE_K) * 512) + tm * tn * 2
+    if smem > SMEM_PER_SM:
+        raise ValueError(
+            f"{smem} bytes of smem exceeds {SMEM_PER_SM}: lower `stages` or `block_k`")
     num_kb = k // bk
     sf_tiles = bk // SF_TILE_K  # scale tiles per K block
     k_scales = bk // SF_VEC_SIZE  # TMEM scale columns per K block
@@ -94,12 +143,12 @@ def masked_grouped_gemm(
                 b_smem=plgpu.SMEM((stages, tn, bk), FP4_DTYPE, transforms=ab_transforms),
                 # exactly the shape async_copy_scales_to_tmem expects, per stage
                 asf_smem=plgpu.SMEM((stages, 1, sf_tiles, 32, 16), SF_DTYPE),
-                bsf_smem=plgpu.SMEM((stages, 1, sf_tiles, 32, 16), SF_DTYPE),
+                bsf_smem=plgpu.SMEM((stages, n_tiles, sf_tiles, 32, 16), SF_DTYPE),
                 out_smem=plgpu.SMEM((tm, tn), jnp.bfloat16),
                 acc_tmem=plgpu.TMEM((tm, tn), jnp.float32),
                 asf_tmem=plgpu.TMEM((TMEM_ROWS, k_scales), SF_DTYPE,
                                     layout=plgpu.TMEMLayout.SCALES_LAYOUT),
-                bsf_tmem=plgpu.TMEM((TMEM_ROWS, k_scales), SF_DTYPE,
+                bsf_tmem=plgpu.TMEM((tn, k_scales), SF_DTYPE,
                                     layout=plgpu.TMEMLayout.SCALES_LAYOUT),
                 ab_barrier=plgpu.Barrier(num_arrivals=4, num_barriers=stages),
                 consumed=plgpu.Barrier(num_barriers=stages, orders_tensor_core=True),
@@ -116,8 +165,9 @@ def masked_grouped_gemm(
                                             ab_barrier.at[slot])
                     plgpu.copy_gmem_to_smem(asf_gmem.at[e, mi, sf_slice], asf_smem.at[slot, 0],
                                             ab_barrier.at[slot])
-                    plgpu.copy_gmem_to_smem(bsf_gmem.at[e, ni, sf_slice], bsf_smem.at[slot, 0],
-                                            ab_barrier.at[slot])
+                    plgpu.copy_gmem_to_smem(
+                        bsf_gmem.at[e, pl.ds(ni * n_tiles, n_tiles), sf_slice],
+                        bsf_smem.at[slot], ab_barrier.at[slot])
 
                 for slot in range(stages):  # prologue
                     @pl.when(slot < num_kb)
