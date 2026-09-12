@@ -118,6 +118,7 @@ def test_moe_reference_runs():
 
 
 for t in (test_exact_values_survive, test_quantization_error_bounded,
-          test_scale_layout_roundtrip, test_scale_layout_indices, test_moe_reference_runs):
+          test_scale_layout_roundtrip, test_scale_layout_indices,
+          test_moe_reference_runs):
     t()
 sys.exit(0 if all(results) else 1)

@@ -69,6 +69,8 @@ class GemmConfig:
     k allows, then as many stages as fit in half an SM -- which is why the two GEMMs in
     a MoE layer, whose k differs, do not need to be configured by hand.
     """
+    collective: bool = False  # 2-CTA MMA: a cluster of 2 shares one 2*tile_m x tile_n
+    #                           tile, each CTA holding half of B's columns. tile_n <= 128.
     tile_n: int = 128  # 128 or 256; see TMEM_ROWS
     block_k: int | None = None  # None: the largest of 512/256/128 that divides k
     stages: int | None = None  # None: the most that still fit two blocks on an SM
@@ -113,10 +115,14 @@ def masked_grouped_gemm(
     tm, tn = TMEM_ROWS, config.tile_n
     if tn not in (128, 256):
         raise ValueError(f"tile_n must be 128 or 256, got {tn}")
-    n_tiles = tn // TMEM_ROWS  # mn-tiles of B scales this tile spans
+    nclu = 2 if config.collective else 1
+    if config.collective and tn > 128:
+        raise ValueError("collective MMA supports tile_n <= 128 (the accumulator's N)")
+    bn = tn // nclu  # B columns this CTA holds; the MMA reads both halves
+    n_tiles = tn // TMEM_ROWS  # mn-tiles of B scales this tile spans (1CTA only)
     bk, stages = _resolve(config, k, tm, tn)
-    if m % tm or n % tn or k % bk:
-        raise ValueError(f"({m}, {n}, {k}) must be tiled by ({tm}, {tn}, {bk})")
+    if m % (tm * nclu) or n % tn or k % bk:
+        raise ValueError(f"({m}, {n}, {k}) must be tiled by ({tm * nclu}, {tn}, {bk})")
     if bk % SF_TILE_K:
         raise ValueError(f"block_k={bk} must be a multiple of {SF_TILE_K}")
     smem = stages * (tm * bk // 2 + tn * bk // 2 + 2 * (bk // SF_TILE_K) * 512) + tm * tn * 2
@@ -132,30 +138,43 @@ def masked_grouped_gemm(
         e = lax.axis_index("l")
         mi = lax.axis_index("mi")
         ni = lax.axis_index("ni")
-        m_slice = pl.ds(mi * tm, tm)
-        n_slice = pl.ds(ni * tn, tn)
+        # in collective mode the cluster's two CTAs split the tile: CTA c takes the
+        # second half of the rows and the second half of B's columns
+        c = lax.axis_index("cta") if config.collective else 0
+        m_slice = pl.ds(mi * tm * nclu + c * tm, tm)
+        n_slice = pl.ds(ni * tn + c * bn, bn)
 
-        @pl.when(mi * tm < mask_gmem[e])  # experts skip the tiles beyond their rows
+        @pl.when(mi * tm * nclu < mask_gmem[e])  # experts skip tiles beyond their rows
         def _():
             @functools.partial(
                 pl.run_scoped,
                 a_smem=plgpu.SMEM((stages, tm, bk), FP4_DTYPE, transforms=ab_transforms),
-                b_smem=plgpu.SMEM((stages, tn, bk), FP4_DTYPE, transforms=ab_transforms),
+                b_smem=plgpu.SMEM((stages, bn, bk), FP4_DTYPE, transforms=ab_transforms),
                 # exactly the shape async_copy_scales_to_tmem expects, per stage
                 asf_smem=plgpu.SMEM((stages, 1, sf_tiles, 32, 16), SF_DTYPE),
                 bsf_smem=plgpu.SMEM((stages, n_tiles, sf_tiles, 32, 16), SF_DTYPE),
                 out_smem=plgpu.SMEM((tm, tn), jnp.bfloat16),
-                acc_tmem=plgpu.TMEM((tm, tn), jnp.float32),
-                asf_tmem=plgpu.TMEM((TMEM_ROWS, k_scales), SF_DTYPE,
+                acc_tmem=plgpu.TMEM((tm, tn), jnp.float32, collective=config.collective),
+                asf_tmem=plgpu.TMEM((TMEM_ROWS, k_scales), SF_DTYPE, collective=config.collective,
                                     layout=plgpu.TMEMLayout.SCALES_LAYOUT),
-                bsf_tmem=plgpu.TMEM((tn, k_scales), SF_DTYPE,
+                bsf_tmem=plgpu.TMEM((tn, k_scales), SF_DTYPE, collective=config.collective,
                                     layout=plgpu.TMEMLayout.SCALES_LAYOUT),
                 ab_barrier=plgpu.Barrier(num_arrivals=4, num_barriers=stages),
                 consumed=plgpu.Barrier(num_barriers=stages, orders_tensor_core=True),
                 mma_done=plgpu.Barrier(orders_tensor_core=True),
+                # the collective MMA reads both CTAs' shared memory, so "my tiles have
+                # landed" is not enough -- the cluster has to agree before it issues,
+                # and again before either CTA overwrites a stage the other is reading
+                **({"cta_ready": plgpu.ClusterBarrier(collective_axes=("cta",),
+                                                      num_barriers=stages),
+                    "cta_free": plgpu.ClusterBarrier(collective_axes=("cta",),
+                                                     num_barriers=stages,
+                                                     orders_tensor_core=True)}
+                   if config.collective else {}),
             )
             def compute(a_smem, b_smem, asf_smem, bsf_smem, out_smem, acc_tmem,
-                        asf_tmem, bsf_tmem, ab_barrier, consumed, mma_done):
+                        asf_tmem, bsf_tmem, ab_barrier, consumed, mma_done,
+                        cta_ready=None, cta_free=None):
                 def fetch(kb, slot):
                     k_slice = pl.ds(kb * bk, bk)
                     sf_slice = pl.ds(kb * sf_tiles, sf_tiles)
@@ -163,8 +182,11 @@ def masked_grouped_gemm(
                                             ab_barrier.at[slot])
                     plgpu.copy_gmem_to_smem(b_gmem.at[e, n_slice, k_slice], b_smem.at[slot],
                                             ab_barrier.at[slot])
-                    plgpu.copy_gmem_to_smem(asf_gmem.at[e, mi, sf_slice], asf_smem.at[slot, 0],
-                                            ab_barrier.at[slot])
+                    plgpu.copy_gmem_to_smem(asf_gmem.at[e, mi * nclu + c, sf_slice],
+                                            asf_smem.at[slot, 0], ab_barrier.at[slot])
+                    # both CTAs load the whole tile's B scales: the MMA indexes them by
+                    # the accumulator's N, which spans both halves, while only the B
+                    # *data* is split by column
                     plgpu.copy_gmem_to_smem(
                         bsf_gmem.at[e, pl.ds(ni * n_tiles, n_tiles), sf_slice],
                         bsf_smem.at[slot], ab_barrier.at[slot])
@@ -177,13 +199,19 @@ def masked_grouped_gemm(
                 def k_block(kb, _):
                     slot = lax.rem(kb, stages)
                     plgpu.barrier_wait(ab_barrier.at[slot])
+                    if config.collective:  # both halves of the tile are now resident
+                        plgpu.barrier_arrive(cta_ready.at[slot])
+                        plgpu.barrier_wait(cta_ready.at[slot])
                     # ASSUMPTION: a single scale buffer per operand is safe to reuse
                     # across K blocks. The copy and the MMA are both issued from this
                     # thread into the tensor core's queue, and that queue is ordered, so
                     # block kb+1's copy cannot overtake block kb's MMA. If a real run
                     # shows corruption here, give these a `stages` leading dimension.
-                    plgpu.async_copy_scales_to_tmem(asf_smem.at[slot], asf_tmem)
-                    plgpu.async_copy_scales_to_tmem(bsf_smem.at[slot], bsf_tmem)
+                    ca = "cta" if config.collective else None
+                    plgpu.async_copy_scales_to_tmem(asf_smem.at[slot], asf_tmem,
+                                                    collective_axis=ca)
+                    plgpu.async_copy_scales_to_tmem(bsf_smem.at[slot], bsf_tmem,
+                                                    collective_axis=ca)
                     plgpu.tcgen05_mma(
                         acc_tmem,
                         a_smem.at[slot],
@@ -193,29 +221,36 @@ def masked_grouped_gemm(
                         a_scale=asf_tmem,
                         b_scale=bsf_tmem,
                         accumulate=kb > 0,  # first block overwrites, rest accumulate
+                        collective_axis=ca,
                     )
 
                     @pl.when(kb + stages < num_kb)
                     def _():
                         plgpu.barrier_wait(consumed.at[slot])  # operands read; slot free
+                        if config.collective:  # ... for this CTA; wait for the other too
+                            plgpu.barrier_arrive(cta_free.at[slot])
+                            plgpu.barrier_wait(cta_free.at[slot])
                         fetch(kb + stages, slot)
 
                     return 0
 
                 lax.fori_loop(0, num_kb, k_block, 0)
 
-                plgpu.tcgen05_commit_arrive(mma_done)
+                plgpu.tcgen05_commit_arrive(
+                    mma_done, collective_axis="cta" if config.collective else None)
                 plgpu.barrier_wait(mma_done)
                 acc = plgpu.async_load_tmem(acc_tmem)
                 plgpu.wait_load_tmem()
                 out_smem[...] = (acc * alpha_gmem[e]).astype(jnp.bfloat16)
                 plgpu.commit_smem()
-                plgpu.copy_smem_to_gmem(out_smem, out_gmem.at[e, m_slice, n_slice])
+                plgpu.copy_smem_to_gmem(out_smem,
+                                        out_gmem.at[e, m_slice, pl.ds(ni * tn, tn)])
                 plgpu.wait_smem_to_gmem(0)
 
     return plgpu.kernel(
         body,
         out_shape=jax.ShapeDtypeStruct((l, m, n), jnp.bfloat16),
-        grid=(l, m // tm, n // tn),
+        grid=(l, m // (tm * nclu), n // tn),
         grid_names=("l", "mi", "ni"),
+        **(dict(cluster=(nclu,), cluster_names=("cta",)) if config.collective else {}),
     )(a_q, a_sf, b_q, b_sf, alpha, masked_m)

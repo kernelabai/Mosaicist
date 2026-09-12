@@ -75,6 +75,9 @@ for label, k, cfg in [
     ("k=4096, block_k=512, 1 stage", 4096, GemmConfig(block_k=512, stages=1)),
     ("k=4096, tile_n=256", 4096, GemmConfig(tile_n=256)),
     ("k=4096, auto block_k/stages", 4096, GemmConfig()),
+    # 2-CTA collective is slower (see the README) but supported, so keep it covered
+    ("k=4096, 2-CTA collective", 4096, GemmConfig(collective=True)),
+    ("k=512,  2-CTA collective", 512, GemmConfig(collective=True)),
 ]:
     case(label, 2, 256, 256, k, cfg)
 

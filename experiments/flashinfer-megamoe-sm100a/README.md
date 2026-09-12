@@ -15,8 +15,8 @@ exactly representable in the fp32 accumulator.
 ```
 test_nvfp4     5/5   NVFP4 arithmetic and the MMA scale tiling (runs on any backend)
 test_kernels   6/6   4 GEMM bit-exact, 2 end-to-end MoE at rms 1.4e-03 - 2.1e-03
-verify_b200   10/10  bit-exact across block_k 128-512, 1-6 stages, tile_n 128/256,
-                     up to 32 K blocks, and 4 seeds
+verify_b200   12/12  bit-exact across block_k 128-512, 1-6 stages, tile_n 128/256,
+                     1-CTA and 2-CTA collective, up to 32 K blocks, and 4 seeds
 check_lowering 6/6   still builds for sm_100a from a non-Blackwell host
 ```
 
@@ -32,19 +32,46 @@ that the tensor core's queue orders the copy behind the previous MMA — holds, 
 A Hopper analog of the same algorithm (fp8, scales applied to the accumulator) is in
 [`../flashinfer-megamoe-sm90a`](../flashinfer-megamoe-sm90a).
 
-## Performance
+## Performance against the kernel this is a port of
 
-`l=8, m=512, k=2048, n=1024` on a B200, device time from CUPTI activity records:
+`l=8, m=512, k=2048, n=1024` on a B200. Both paths measured the same way, from CUPTI
+activity records; `bench_moe.py` runs the Pallas side and `bench_flashinfer.py` the
+reference (it needs its own venv — torch, flashinfer, nvidia-cutlass-dsl).
 
-| stage | µs | TFLOP/s |
-|---|---:|---:|
-| quantize hidden | 10.5 | |
-| ↳ retile scales | 1.9 | |
-| gemm1 `(l,m,k)×(l,2n,k)` | 20.7 | 1660 |
-| silu_and_mul + quantize | 17.0 | |
-| gemm2 `(l,m,n)×(l,k,n)` | 15.1 | 1136 |
-| **moe_masked (end to end)** | **83.5** | **618** |
-| dense bf16 `jnp.einsum` baseline | 62.6 | 823 |
+| stage | FlashInfer CuTeDSL | this port | gap |
+|---|---:|---:|---:|
+| quantize hidden | 10.9 µs | 12.4 µs (incl. retile) | 1.14× |
+| gemm1 `(l,m,k)×(l,2n,k)` | 13.4 µs · 2572 TFLOP/s | 20.7 µs · 1660 | 1.54× |
+| silu_and_mul + quantize | 8.7 µs | 17.0 µs | 1.95× |
+| gemm2 `(l,m,n)×(l,k,n)` | 9.4 µs · 1821 TFLOP/s | 15.1 µs · 1136 | 1.61× |
+| **end to end** | **46.0 µs** | **83.5 µs** | **1.82×** |
+| dense bf16 `jnp.einsum` baseline | 62.6 µs | | |
+
+**The port runs at 55% of the reference.** The reference beats the dense bf16 baseline
+by 1.36×; this port is still 0.75× it, so the baseline was the flattering comparison and
+the CuTeDSL kernel is the real bar.
+
+The gap is structural, and the three causes are visible in
+`flashinfer/gemm/kernels/grouped_gemm_masked_blackwell.py`:
+
+* **2-CTA collective MMA** — `mma_tiler_mn 256,128` with `cluster_shape_mn 2,1` and
+  `use_2cta_instrs`. Twice the M tile, and B is fetched once per cluster rather than
+  once per CTA.
+* **A persistent scheduler** — `num_persistent_clusters` and a tile scheduler, so CTAs
+  launch once and walk tiles, amortizing the prologue and keeping weights in L2.
+* **Warp specialization** — dedicated `tma_warp_id`, `mma_warp_id` and a separate
+  epilogue warp group. This port has one warpgroup doing TMA issue, MMA and epilogue in
+  sequence.
+
+Optimization so far took the port from 120.4 µs to 83.5 µs (1.44×), every step verified
+bit-exact:
+
+| change | effect |
+|---|---|
+| `exp2` instead of `jax.nn.sigmoid` | 42.1 → 27.1 µs on the fused kernel |
+| `approx_math=True` | 26.5 → 16.9 µs on the same kernel |
+| `SUB_K=64` sub-tiles for the one-hot expansion | 14.2 → 10.3 µs on plain quantize |
+| shape-adaptive `block_k` / `stages` | gemm1 27.2 → 20.7, gemm2 18.5 → 15.1 |
 
 Optimization took it from 120.4 µs to 83.5 µs (1.44×), every step verified bit-exact:
 
@@ -54,11 +81,6 @@ Optimization took it from 120.4 µs to 83.5 µs (1.44×), every step verified bi
 | `approx_math=True` | 26.5 → 16.9 µs on the same kernel |
 | `SUB_K=64` sub-tiles for the one-hot expansion | 14.2 → 10.3 µs on plain quantize |
 | shape-adaptive `block_k` / `stages` | gemm1 27.2 → 20.7, gemm2 18.5 → 15.1 |
-
-**Still 0.75× the dense bf16 baseline.** The GEMMs are the fast part; the two quantize
-kernels cost 27.5 µs that the baseline never pays. Fusing `silu_and_mul + quantize` into
-GEMM1's epilogue would remove most of it — that kernel writes 16.8 MB of bf16 and reads
-it straight back — and is the clear next step.
 
 ## Why Blackwell changes the shape of the kernel
 
@@ -84,9 +106,36 @@ these GEMMs reach 1660 TFLOP/s where the Hopper analog reaches 376.
 | `verify_b200.py` | non-triviality checks and the scale-buffer stress |
 | `check_lowering.py` | builds every kernel for sm_100a from any host, with a negative control |
 | `bench_moe.py` | device-time benchmark against a dense bf16 baseline |
-| `probe_*.py` | the diagnostics behind the findings below |
+| `bench_flashinfer.py` | the same measurement for FlashInfer's CuTeDSL kernel (separate venv) |
+| `probe_*.py` | the diagnostics behind the findings below, incl. `probe_collective.py` |
 
 ## What the port turned up
+
+**A 2-CTA collective MMA does not pay without warp specialization.** The reference uses
+one, so it looked like the biggest single lever. Implemented and verified bit-exact, it
+is slower at every setting tried:
+
+| config | smem | blocks/SM | TFLOP/s |
+|---|---:|---|---:|
+| 1 CTA, `block_k=512, stages=1` | 107 KB | 2 | **1878** |
+| 1 CTA, `block_k=256, stages=2` | 107 KB | 2 | 1856 |
+| 2 CTA, `block_k=256, stages=2` | 90 KB | 2 | 1629 |
+| 2 CTA, `block_k=512, stages=1` | 90 KB | 2 | 1562 |
+| 2 CTA, `block_k=256, stages=1` | 61 KB | 3 | 1260 |
+
+Halving B's traffic is real, and the cluster does free enough shared memory for a third
+resident block, but neither pays for the synchronisation. The collective MMA reads both
+CTAs' shared memory, so every K block needs a cluster-wide barrier before the MMA and
+another before a stage can be refetched, and in a kernel where the same warpgroup issues
+the TMAs those round trips sit on the critical path. FlashInfer pairs its collective MMA
+with a dedicated TMA warp that runs ahead of exactly these barriers; that is the part to
+copy first.
+
+Two things about it were only learnable by running it. The accumulator and scale TMEM
+refs must be declared `collective=True` or lowering rejects them. And each CTA needs the
+**whole** tile's B scales even though it holds only half of B's columns — the MMA
+indexes `b_scale` by the accumulator's N, which spans both halves. Giving each CTA only
+its own half produced finite, wrong results rather than an error.
 
 **Shared memory buys occupancy, not pipeline depth.** A block over half the SM's 232 KB
 runs alone, and that decides throughput more than anything else:
@@ -136,14 +185,22 @@ sits exactly on TMA's 16-byte minimum row and produces wrong values, so 64 is th
 `to_mma_scale_layout` element-by-element against the PTX spec's index mapping rather
 than trusting the reshape.
 
-## Known limitations
+## Known limitations, in the order worth fixing
 
-* The two quantize kernels are separate launches and account for 27.5 µs of the 83.5.
-  Fusing `silu_and_mul + quantize` into GEMM1's epilogue is the next real win.
-* `tile_m` is fixed at 128 by the MMA scale path; `tile_n` may be 128 or 256, and 256
-  measured slower because it costs the second resident block.
-* No warp specialization and no persistent scheduler. JAX's own
-  `blackwell_matmul_mgpu.py` splits the MMA and epilogue across two warpgroups.
+1. **No warp specialization or persistent scheduler.** JAX's own
+   `blackwell_matmul_mgpu.py` is a working template for both. This moved to the top
+   after the collective experiment below: it is the prerequisite, not an alternative.
+2. **2-CTA collective MMA is implemented but off** (`GemmConfig(collective=True)`),
+   because it measured slower — see below.
+3. **`silu_and_mul + quantize` is a separate launch** that writes 16.8 MB of bf16 and
+   reads it straight back. With all arithmetic ablated away it still costs 11.9 µs, so
+   that traffic is most of the 1.95× gap on the worst stage; it belongs in GEMM1's
+   epilogue.
+4. **The one-hot expansion** exists only because Mosaic cannot reduce over a sub-row
+   group of a register tile. Worth a JAX issue, or an attempt through
+   `plgpu.inline_mgpu`.
+5. `tile_m` is fixed at 128 by the MMA scale path; `tile_n` may be 128 or 256, and 256
+   measured slower because it costs the second resident block.
 * The scale re-tiling between stages is a separate pass over a tensor 1/16 the size of
   the data (1.9 µs) rather than being fused into the quantize epilogue; the tiled store
   is a scatter within the tile, so it needs a different epilogue, not a tweak.
